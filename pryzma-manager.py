@@ -202,7 +202,6 @@ def build_parser():
 
     return parser
 
-
 def main():
     init_main_env()
     parser = build_parser()
