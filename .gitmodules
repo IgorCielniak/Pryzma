@@ -1,0 +1,3 @@
+[submodule "Pryzma-programming-language"]
+	path = Pryzma-programming-language
+	url = https://github.com/IgorCielniak/Pryzma-programming-language
