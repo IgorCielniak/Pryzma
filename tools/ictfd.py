@@ -1,97 +1,43 @@
 import os
 import sys
+import time
+import argparse
+import configparser
 import requests
 from urllib.parse import urlparse
 from datetime import datetime
 
-DOWNLOADS_FOLDER = os.path.join(str(os.path.expanduser("~")), "downloads")
-DEFAULT_CHUNK_SIZE = 8192
-VERSION = "1.9"
+VERSION = "2.0"
 GITHUB_API_URL = "https://api.github.com/repos/IgorCielniak/ictfd/releases/latest"
-LATEST_VERSION = requests.get(GITHUB_API_URL).json()["tag_name"]
-GITHUB_RELEASE_URL = f"https://raw.githubusercontent.com/IgorCielniak/ictfd/{LATEST_VERSION}/ictfd.py"
+GITHUB_RELEASE_URL = f"https://raw.githubusercontent.com/IgorCielniak/ictfd/main/ictfd.py"
 
-def create_downloads_folder():
-    if not os.path.exists(DOWNLOADS_FOLDER):
-        os.makedirs(DOWNLOADS_FOLDER)
+DEFAULT_CONFIG = {
+    "chunk_size": 8192,
+    "timeout": 5,
+    "retries": 3,
+    "download_dir": os.path.join(os.path.expanduser("~"), "Downloads")
+}
 
-def download_http_file(url, chunk_size=DEFAULT_CHUNK_SIZE):
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".ictfd")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
 
-    total_size = int(response.headers.get('content-length', 0))
-    file_name = os.path.join(DOWNLOADS_FOLDER, url.split("/")[-1])
 
-    print(f"{url}")
-    print(f"Resolving {parsed_url.netloc} ({parsed_url.netloc})... connected.")
-    print(f"HTTP request sent, awaiting response... {response.status_code} {response.reason}")
-    print(f"Length: {total_size} ({format_bytes(total_size)}) [{response.headers['content-type']}]")
+def load_config():
+    config = configparser.ConfigParser()
+    if not os.path.exists(CONFIG_DIR):
+        os.makedirs(CONFIG_DIR)
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w") as f:
+            f.write(
+                "[defaults]\n"
+                "chunk_size = 8192\n"
+                "timeout = 5\n"
+                "retries = 3\n"
+                "download_dir = ~/Downloads\n"
+            )
+    config.read(CONFIG_FILE)
+    return config
 
-    if os.path.exists(file_name):
-        if not prompt_user_overwrite(file_name):
-            print("Download canceled.")
-            return
-
-    print(f"Saving to: '{file_name}'")
-    print(f"Using chunk size: {chunk_size} bytes")
-    print("Press Ctrl+C to cancel the download.")
-
-    start_time = datetime.now()
-    downloaded_size = 0
-
-    try:
-        with open(file_name, "wb") as file:
-            for chunk in response.iter_content(chunk_size=chunk_size):
-                file.write(chunk)
-                downloaded_size += len(chunk)
-
-                elapsed_time = (datetime.now() - start_time).total_seconds()
-                download_speed = downloaded_size / elapsed_time
-                percentage = (downloaded_size / total_size) * 100
-                estimated_time = (total_size - downloaded_size) / download_speed if download_speed > 0 else 0
-
-                print(f"\rDownload Speed: {format_bytes(download_speed)}/s | "
-                      f"Progress: {percentage:.2f}% | "
-                      f"Estimated Time: {estimated_time:.0f} seconds", end="", flush=True)
-
-    except KeyboardInterrupt:
-        print("\nDownload canceled. Deleting incomplete file...")
-        os.remove(file_name)
-        print("Incomplete file deleted.")
-        return
-
-    print("\nFile downloaded successfully.")
-    
-    print(f"Total Time: {format_time(elapsed_time)}")
-
-def prompt_user_overwrite(file_path):
-    user_input = input(f"File '{file_path}' already exists. Do you want to overwrite it? (y/n): ").lower()
-    return user_input == 'y'
-
-def display_help():
-    print("Usage:")
-    print("  python ictfd.py [URL] [-c CHUNK_SIZE] [-h] [-v]")
-    print("\nOptions:")
-    print("  URL                  The URL of the file to download.")
-    print("  -c, --chunk-size    Custom chunk size for downloading.")
-    print("  -h, --help          Display this help message.")
-    print("  -v, --version       Display the version and check for updates.")
-
-def display_version():
-    print(f"ICTFD Version {VERSION}")
-
-    if "--version" or "-v" in sys.argv:
-        try:
-            latest_version = requests.get(GITHUB_API_URL).json()["tag_name"]
-            if latest_version != VERSION:
-                print(f"\nA newer version ({latest_version}) is available. You can download it from: {GITHUB_RELEASE_URL}")
-                user_input = input("Do you want to download the newer version? (y/n): ").lower()
-                if user_input == 'y':
-                    # Download the newer version
-                    print("Downloading the newer version...")
-                    download_file(GITHUB_RELEASE_URL)
-        except Exception as e:
-            print("Failed to check for updates:", e)
 
 def format_bytes(size):
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -99,81 +45,134 @@ def format_bytes(size):
             return f"{size:.2f} {unit}"
         size /= 1024.0
 
+
 def format_time(seconds):
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
 
-def download_file(url, custom_chunk_size=None):
+
+def create_folder(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def download_http_file(url, dest_path, chunk_size, timeout, retries):
+    file_name = os.path.join(dest_path, os.path.basename(url))
+    for attempt in range(retries):
+        try:
+            if os.path.exists(file_name):
+                choice = input(f"'{file_name}' exists. Overwrite? (y/n): ").lower()
+                if choice != "y":
+                    print("Download canceled.")
+                    return
+
+            response = requests.get(url, stream=True, timeout=timeout)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get("content-length", 0))
+            parsed_url = urlparse(url)
+
+            print(f"{url}")
+            print(f"Resolving {parsed_url.netloc}... connected.")
+            print(f"HTTP request sent, awaiting response... {response.status_code} {response.reason}")
+            print(f"Length: {total_size} ({format_bytes(total_size)}) [{response.headers['content-type']}]")
+            print(f"Saving to: '{file_name}'")
+            print(f"Using chunk size: {chunk_size} bytes")
+            print("Press Ctrl+C to cancel the download.")
+
+            start_time = datetime.now()
+            downloaded = 0
+
+            with open(file_name, "wb") as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        speed = downloaded / elapsed if elapsed > 0 else 0
+
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            percent = min(percent, 100)
+                            remaining = (total_size - downloaded) / speed if speed > 0 else 0
+                            print(
+                                f"\rSpeed: {format_bytes(speed)}/s | "
+                                f"Progress: {percent:.2f}% | "
+                                f"ETA: {remaining:.0f}s", end="", flush=True
+                            )
+                        else:
+                            print(
+                                f"\rSpeed: {format_bytes(speed)}/s | "
+                                f"Downloaded: {format_bytes(downloaded)}", end="", flush=True
+                            )
+            break
+        except requests.RequestException as e:
+            print(f"\nError: {e}")
+            if attempt < retries - 1:
+                print("Retrying in 5 seconds...")
+                time.sleep(5)
+            else:
+                print("Max retries reached. Download failed.")
+                return
+        except KeyboardInterrupt:
+            print("\nDownload interrupted. Cleaning up...")
+            if os.path.exists(file_name):
+                os.remove(file_name)
+            print("Partial file deleted.")
+            return
+
+    print("\nDownload complete.")
+    print(f"Elapsed time: {format_time((datetime.now() - start_time).total_seconds())}")
+
+
+def check_for_updates():
     try:
-        global parsed_url
-        parsed_url = urlparse(url)
-        scheme = parsed_url.scheme.lower()
-
-        create_downloads_folder()
-
-        if scheme in ["http", "https"]:
-            chunk_size = custom_chunk_size if custom_chunk_size is not None else DEFAULT_CHUNK_SIZE
-            download_http_file(url, chunk_size)
+        latest_version = requests.get(GITHUB_API_URL).json()["tag_name"]
+        if latest_version != VERSION:
+            print(f"\nA newer version ({latest_version}) is available.")
+            print(f"Download: {GITHUB_RELEASE_URL}")
+            if input("Download now? (y/n): ").lower() == "y":
+                download_http_file(GITHUB_RELEASE_URL, os.path.dirname(os.path.abspath(__file__)),
+                                   DEFAULT_CONFIG["chunk_size"], DEFAULT_CONFIG["timeout"], DEFAULT_CONFIG["retries"])
         else:
-            print(f"Unsupported scheme: {scheme}. Cannot download the file.")
+            print("You are using the latest version.")
     except Exception as e:
-            print(f"Error downloading file: {e}")
+        print("Update check failed:", e)
 
-def interactive_mode():
-    print("\nICTFD - Interactive Mode\n")
-    print("Welcome to ICTFD (Interactive Command-Line File Downloader)!\n")
-    print("To download files, please follow these steps:")
-    print("1. Enter the number of files you want to download.")
-    print("2. For each file, enter the URL of the file.")
-    print("3. Optionally, specify a custom chunk size for downloading.")
-    print("4. Press Enter after each URL to proceed to the next file.\n")
 
-    try:
-        num_files = int(input("Enter the number of files to download: "))
-    except ValueError:
-        print("Invalid input. Please enter a valid number.")
-        return
+def main():
+    config = load_config()
 
-    for i in range(1, num_files + 1):
-        print(f"\nFile {i}:")
-        url = input("Enter the URL of the file: ")
+    parser = argparse.ArgumentParser(description="ICTFD - CLI file downloader")
+    parser.add_argument("url", nargs="?", help="The URL of the file to download.")
+    parser.add_argument("-c", "--chunk-size", type=int, default=int(config["defaults"].get("chunk_size", DEFAULT_CONFIG["chunk_size"])))
+    parser.add_argument("-d", "--download-dir", default=os.path.expanduser(config["defaults"].get("download_dir", DEFAULT_CONFIG["download_dir"])))
+    parser.add_argument("-t", "--timeout", type=int, default=int(config["defaults"].get("timeout", DEFAULT_CONFIG["timeout"])))
+    parser.add_argument("-r", "--retries", type=int, default=int(config["defaults"].get("retries", DEFAULT_CONFIG["retries"])))
+    parser.add_argument("-v", "--version", action="store_true", help="Show version info and check for updates.")
+    
+    args = parser.parse_args()
 
-        custom_chunk_size = None
-        chunk_size_input = input("Enter custom chunk size (press Enter for default): ")
-        if chunk_size_input:
-            try:
-                custom_chunk_size = int(chunk_size_input)
-            except ValueError:
-                print("Invalid chunk size. Using default.")
+    if args.version:
+        print(f"ICTFD Version {VERSION}")
+        check_for_updates()
+        sys.exit()
 
-        download_file(url, custom_chunk_size)
+    if not args.url:
+        parser.print_help()
+        sys.exit()
 
-    input("\nPress Enter to exit.")
+    parsed_url = urlparse(args.url)
+    if parsed_url.scheme not in ["http", "https"]:
+        print(f"Unsupported scheme: {parsed_url.scheme}")
+        sys.exit()
+
+    create_folder(args.download_dir)
+    download_http_file(args.url, args.download_dir, args.chunk_size, args.timeout, args.retries)
+
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        interactive_mode()
-    else:
-        if sys.argv[1] in ["-h", "--help"]:
-            display_help()
-        elif sys.argv[1] in ["-v", "--version"]:
-            display_version()
-        else:
-            url_index = 1
-            custom_chunk_size = None
+    main()
 
-            if sys.argv[1].startswith("-"):
-                url_index = None
-
-            for index, arg in enumerate(sys.argv[1:], start=1):
-                if arg == "-c" or arg == "--chunk-size":
-                    try:
-                        custom_chunk_size = int(sys.argv[index + 1])
-                    except IndexError:
-                        print("Invalid custom chunk size. Using default chunk size.")
-
-            if url_index is not None:
-                download_file(sys.argv[url_index], custom_chunk_size)
-            else:
-                print("Invalid command. Use -h or --help option to see usage instructions.")

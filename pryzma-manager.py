@@ -4,6 +4,10 @@ import sys
 import json
 import shutil
 import subprocess
+import requests
+import zipfile
+import io
+from pathlib import Path
 
 PRYZMA_PATH = os.path.abspath(os.path.dirname(__file__))
 PROJECTS_PATH = os.path.abspath(os.path.join(PRYZMA_PATH, "projects"))
@@ -12,6 +16,37 @@ CONFIG_PATHS = [
     os.path.abspath("./config.json"),
     os.path.expanduser("~/.pryzma/config.json")
 ]
+
+
+PACKAGES_DIR = os.path.join(PRYZMA_PATH, "Pryzma-programming-language", "packages")
+
+
+TEMPLATES = {
+    "basic": {
+        "description": "Basic Pryzma project",
+        "files": {
+            "main.pryzma": '# Your main script\n/main{\n    print "Hello, Pryzma!"\n}\n\n@main',
+            "README.md": "# {project_name}\n\nA Pryzma project",
+        }
+    },
+    "lib": {
+        "description": "Library project template",
+        "files": {
+            "src/module.pryzma": "# Library module\n/greet{\n    return 'Hello, ' + args[0]\n}",
+            "test.pryzma": '# Tests\nuse ./src/module.pryzma\n\nprint @module.greet("my name")',
+            "README.md": "# {project_name}\n\nA Pryzma library",
+            "metadata.json": '{"name": "{project_name}", "version": "1.0.0", "files": ["src/module.pryzma", "tests/test_module.pryzma"], "author": "Your name", "description": "{project_name} - library written in Pryzma", "license": "MIT"}'
+        }
+    },
+}
+
+
+GITIGNORE_TEMPLATE = """
+.gitignore
+__pycache__/
+*.swp
+*.swo
+"""
 
 
 def load_config():
@@ -23,18 +58,63 @@ def load_config():
     print(f"[config] No config file found at {CONFIG_PATHS[0]} or {CONFIG_PATHS[1]}")
     return {}
 
-
 def init_main_env():
     for path in [VENVS_PATH, PROJECTS_PATH]:
         if not os.path.exists(path):
             os.makedirs(path)
             print(f"[init] Created {path}")
 
+def create_project_structure(project_path, template_name, project_name):
+    """Create project files based on template"""
+    if template_name not in TEMPLATES:
+        print(f"[init] Unknown template '{template_name}'. Using 'basic' template.")
+        template_name = "basic"
+    
+    template = TEMPLATES[template_name]
+    
+    print(f"[init] Creating project with '{template_name}' template")
+    print(f"[init] {template['description']}")
+    
+    for rel_path, content in template["files"].items():
+        rel_path = rel_path.replace("{project_name}", project_name)
+        
+        if "{project_name}" in content:
+            content = content.replace("{project_name}", project_name)
+        
+        full_path = os.path.join(project_path, rel_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        
+        with open(full_path, "w") as f:
+            f.write(content)
+        print(f"[init] Created {rel_path}")
 
-def init_project(name=None, interactive=False):
+    lib_entry = "src/module.pryzma"
+    basic_entry = "main.pryzma"
+
+    config = {
+        "name": project_name,
+        "type": template_name,
+        "version": "1.0",
+        "entry_point": f"{lib_entry if template_name == "lib" else basic_entry}",
+        "description": TEMPLATES[template_name]["description"],
+    }
+
+    config_path = os.path.join(project_path, ".pryzma")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=4)
+    print(f"[init] Created .pryzma config at {config_path}")
+
+
+def init_project(name=None, interactive=False, template="basic", use_git=False, create_gitignore=True):
     if interactive:
         print("[init] Interactive project creation:")
         name = input("Enter project name: ").strip()
+        print("Available templates:")
+        for tpl_name, tpl_info in TEMPLATES.items():
+            print(f"  {tpl_name}: {tpl_info['description']}")
+        template = input("Choose template (default: basic): ").strip() or "basic"
+        if use_git:
+            create_gitignore = input("Create a .gitignore (default: Yes): ").strip() or True
 
     if not name:
         print("[init] Project name is required.")
@@ -46,8 +126,22 @@ def init_project(name=None, interactive=False):
         return
 
     os.makedirs(path)
+    create_project_structure(path, template, name)
     print(f"[init] Created project '{name}' at {path}")
 
+    if use_git:
+        try:
+            subprocess.run(["git", "init"], cwd=path, check=True)
+            print(f"[init] Initialized empty Git repository in {path}")
+
+            if create_gitignore:
+                gitignore_path = os.path.join(path, ".gitignore")
+                with open(gitignore_path, "w") as f:
+                    f.write(GITIGNORE_TEMPLATE.strip() + "\n")
+                print(f"[init] Created .gitignore at {gitignore_path}")
+
+        except Exception as e:
+            print(f"[git] Failed to initialize Git repo: {e}")
 
 def remove_project(name):
     path = os.path.join(PROJECTS_PATH, name)
@@ -56,7 +150,7 @@ def remove_project(name):
         print(f"[remove] Project '{name}' does not exist.")
         return
 
-    confirm = input(f"[remove] Delete project '{name}'? (y/n): ").lower()
+    confirm = input(f"[remove] Delete project '{name}' and all its contents? (y/n): ").lower()
     if confirm == "y":
         try:
             shutil.rmtree(path)
@@ -66,8 +160,7 @@ def remove_project(name):
     else:
         print("[remove] Cancelled.")
 
-
-def list_projects():
+def list_projects(detailed=False):
     print("[list] Listing all projects...")
     if not os.path.exists(PROJECTS_PATH):
         print("[list] No projects directory found.")
@@ -78,7 +171,52 @@ def list_projects():
         print("[list] No projects found.")
     else:
         for project in projects:
+            project_path = os.path.join(PROJECTS_PATH, project)
+            if detailed:
+                config_path = os.path.join(project_path, ".pryzma")
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path) as f:
+                            config = json.load(f)
+                        print(f" - {project} (v{config.get('version', '?.?.?')})")
+                        print(f"   Type: {config.get('type', 'unknown')}")
+                        print(f"   Path: {project_path}")
+                        if "description" in config:
+                            print(f"   Description: {config['description']}")
+                        print()
+                        continue
+                    except json.JSONDecodeError:
+                        pass
             print(f" - {project}")
+
+def show_project_info(name):
+    project_path = os.path.join(PROJECTS_PATH, name)
+    if not os.path.exists(project_path):
+        print(f"[info] Project '{name}' does not exist.")
+        return
+
+    config_path = os.path.join(project_path, ".pryzma")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            print(f"Project: {name}")
+            print(f"Path: {project_path}")
+            print(f"Type: {config.get('type', 'unknown')}")
+            print(f"Version: {config.get('version', '?.?.?')}")
+            if "description" in config:
+                print(f"Description: {config['description']}")
+            if "entry_point" in config:
+                print(f"Entry point: {config['entry_point']}")
+            return
+        except json.JSONDecodeError:
+            pass
+
+    print(f"Basic project: {name}")
+    print(f"Path: {project_path}")
+    print("No additional project metadata found.")
+
+
 
 def venv_command(action, name=None):
     if action == "create":
@@ -101,9 +239,9 @@ def venv_command(action, name=None):
         os.makedirs(target_path, exist_ok=True)
 
         if os.path.isdir(interpreter_path):
-            os.system(f'cp "{interpreter_path}"/Pryzma.py "{target_path}/"')
+            shutil.copy(os.path.join(interpreter_path, "Pryzma.py"), target_path)
         else:
-            os.system(f'cp "{interpreter_path}" "{target_path}/"')
+            shutil.copy(interpreter_path, target_path)
 
         print(f"[venv] Created virtual environment '{name}' in '{target_path}'.")
 
@@ -137,9 +275,13 @@ def venv_command(action, name=None):
             print("[venv] Cancelled.")
 
 
-def run_script(path=None):
+def run_script(path=None, debug=False):
     config = load_config()
     interpreter_path = config.get("interpreter_path", "Pryzma-programming-language")
+    
+    if not os.path.exists(os.path.join(interpreter_path, "Pryzma.py")):
+        print(f"[run] Interpreter not found at '{interpreter_path}'")
+        return
 
     if path:
         print(f"[run] Running Pryzma script at '{path}'...")
@@ -148,7 +290,10 @@ def run_script(path=None):
         try:
             from Pryzma import PryzmaInterpreter
             interpreter = PryzmaInterpreter()
-            interpreter.interpret_file(path)
+            if debug:
+                interpreter.debug_interpreter(interpreter, path, True, None)
+            else:
+                interpreter.interpret_file(path)
         except ImportError as e:
             print(f"[error] Could not import Pryzma interpreter: {e}")
         except Exception as e:
@@ -163,6 +308,111 @@ def run_script(path=None):
             print(f"[error] Error launching interpreter: {e}")
 
 
+def ppm_install(package_name):
+    os.makedirs(PACKAGES_DIR, exist_ok=True)
+    package_path = os.path.join(PACKAGES_DIR, package_name)
+
+    if os.path.exists(package_path):
+        print(f"Package '{package_name}' is already installed.")
+        return
+
+    # === PRIMARY SOURCE ===
+    primary_url = f"http://igorcielniak.pythonanywhere.com/api/download/{package_name}"
+    print(f"Trying to download {package_name} from primary source...")
+
+    try:
+        response = requests.get(primary_url, timeout=10)
+        response.raise_for_status()
+
+        print("Download succeeded. Extracting package...")
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
+            zip_ref.extractall(package_path)
+        print(f"{package_name} installed successfully from primary source.")
+        return
+    except Exception as e:
+        print(f"Primary source failed: {e}")
+
+    # === FALLBACK SOURCE ===
+    print("Trying fallback source (GitHub)...")
+
+    github_repo_url = "https://github.com/IgorCielniak/Pryzma-packages"
+    clone_dir = os.path.join("/tmp", f"ppm_temp_{package_name}")
+
+    try:
+        subprocess.run(["git", "clone", "--depth=1", github_repo_url, clone_dir], check=True)
+
+        package_folder = os.path.join(clone_dir, package_name)
+        if not os.path.isdir(package_folder):
+            raise FileNotFoundError(f"Package '{package_name}' not found in GitHub repo.")
+
+        shutil.copytree(package_folder, package_path)
+        print(f"{package_name} installed successfully from GitHub.")
+    except Exception as e:
+        print(f"Fallback source failed: {e}")
+        print("Package installation failed from both sources.")
+    finally:
+        if os.path.exists(clone_dir):
+            shutil.rmtree(clone_dir)
+
+
+def ppm_list():
+    if not os.path.isdir(PACKAGES_DIR):
+        print("No packages installed.")
+        return
+
+    packages = os.listdir(PACKAGES_DIR)
+    if not packages:
+        print("No packages installed.")
+        return
+
+    print("Installed packages:")
+    for pkg in packages:
+        print(f"- {pkg}")
+
+
+def ppm_remove(package_name):
+    package_path = os.path.join(PACKAGES_DIR, package_name)
+
+    if os.path.isdir(package_path):
+        shutil.rmtree(package_path)
+        print(f"Package '{package_name}' removed.")
+    else:
+        print(f"Package '{package_name}' not found.")
+
+
+def ppm_info(package_name):
+    metadata_path = os.path.join(PACKAGES_DIR, package_name, "metadata.json")
+
+    if not os.path.isfile(metadata_path):
+        print(f"No metadata found for package '{package_name}'.")
+        return
+
+    try:
+        with open(metadata_path, "r") as f:
+            data = json.load(f)
+
+        print("Package Info:")
+        for key, value in data.items():
+            print(f"{key.capitalize()}: {value}")
+    except Exception as e:
+        print(f"Error reading metadata: {e}")
+
+def ppm_update_package(package_name):
+    print(f"Updating {package_name}...")
+    shutil.rmtree(os.path.join(PACKAGES_DIR, package_name))
+    ppm_install(package_name)
+    print(f"Updated {package_name} successfully.\n")
+
+def ppm_update_all():
+    if not Path(PACKAGES_DIR).exists():
+        print("No packages installed.")
+        return
+    
+    for pkg in Path(PACKAGES_DIR).iterdir():
+        if pkg.is_dir():
+            ppm_update_package(pkg.name)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="pryzma-manager", description="Manage Pryzma projects and environments")
     subparsers = parser.add_subparsers(dest="command")
@@ -174,15 +424,24 @@ def build_parser():
     proj_init = proj_subparsers.add_parser("init", help="Initialize a new Pryzma project")
     proj_init.add_argument("name", nargs="?", help="Project name")
     proj_init.add_argument("-i", "--interactive", action="store_true", help="Interactive mode")
+    proj_init.add_argument("-t", "--template", choices=list(TEMPLATES.keys()), default="basic",
+                          help="Project template to use")
+    proj_init.add_argument("-g", "--git", action="store_true", help="Use git")
+    proj_init.add_argument("-gi", "--git-ignore", action="store_true", help="Create a default .gitignore")
 
     proj_remove = proj_subparsers.add_parser("remove", help="Remove a project")
     proj_remove.add_argument("name", help="Project name")
 
-    proj_subparsers.add_parser("list", help="List all Pryzma projects")
+    proj_list = proj_subparsers.add_parser("list", help="List all Pryzma projects")
+    proj_list.add_argument("-d", "--detailed", action="store_true", help="Show detailed project information")
+
+    proj_info = proj_subparsers.add_parser("info", help="Show project information")
+    proj_info.add_argument("name", help="Project name")
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
+    run_parser.add_argument("-d", "--debug", action="store_true", help="Flag used to run in debug mode")
 
     # Venv group
     venv_parser = subparsers.add_parser("venv", help="Manage Pryzma virtual environments")
@@ -200,6 +459,11 @@ def build_parser():
     ictfd_parser = subparsers.add_parser("ictfd", help="Run ictfd with provided arguments")
     ictfd_parser.add_argument("ictfd_args", nargs=argparse.REMAINDER, help="Arguments for ictfd")
 
+    #ppm parser
+    ppm = subparsers.add_parser("ppm")
+    ppm.add_argument("action", choices=["install", "list", "remove", "info", "update"])
+    ppm.add_argument("package", nargs="?")
+
     return parser
 
 def main():
@@ -209,15 +473,17 @@ def main():
 
     if args.command == "proj":
         if args.proj_command == "init":
-            init_project(name=args.name, interactive=args.interactive)
+            init_project(name=args.name, interactive=args.interactive, template=args.template, use_git=args.git, create_gitignore=args.git_ignore)
         elif args.proj_command == "remove":
             remove_project(args.name)
         elif args.proj_command == "list":
-            list_projects()
+            list_projects(args.detailed)
+        elif args.proj_command == "info":
+            show_project_info(args.name)
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
-        run_script(args.path)
+        run_script(args.path, args.debug)
     elif args.command == "venv":
         if args.venv_command == "create":
             venv_command("create", getattr(args, "name", None))
@@ -227,6 +493,22 @@ def main():
             venv_command("list")
         else:
             print("[venv] Unknown venv subcommand.")
+    elif args.command == "ppm":
+        if args.action == "install" and args.package:
+            ppm_install(args.package)
+        elif args.action == "list":
+            ppm_list()
+        elif args.action == "remove" and args.package:
+            ppm_remove(args.package)
+        elif args.action == "info" and args.package:
+            ppm_info(args.package)
+        elif args.action == "update":
+            if args.package:
+                ppm_update_package(args.package)
+            else:
+                ppm_update_all()
+        else:
+            print("Invalid command or missing package name.")
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
