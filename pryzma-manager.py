@@ -294,6 +294,25 @@ def get_project_entry_point(project_name):
 
 
 def run_project(name, debug=False):
+    project_path = os.path.join(PROJECTS_PATH, name)
+
+    config_path = os.path.join(project_path, ".pryzma")
+    venv_path = None
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+                venv_path = config.get("venv")
+        except json.JSONDecodeError:
+            pass
+
+    if venv_path and os.path.exists(venv_path):
+        interpreter_path = venv_path
+        print(f"[run] Using virtual environment at {venv_path}")
+    else:
+        config = load_config()
+        interpreter_path = config.get("interpreter_path", "Pryzma-programming-language")
+
     entry_point = get_project_entry_point(name)
     if not entry_point:
         return False
@@ -303,10 +322,32 @@ def run_project(name, debug=False):
         return False
 
     print(f"[run] Running project '{name}' entry point: {entry_point}")
-    return run_script(entry_point, debug)
+
+    original_path = sys.path.copy()
+
+    try:
+        sys.path.append(os.path.abspath(interpreter_path))
+
+        try:
+            from Pryzma import PryzmaInterpreter
+            interpreter = PryzmaInterpreter()
+            if debug:
+                interpreter.debug_interpreter(interpreter, entry_point, True, None)
+            else:
+                interpreter.interpret_file(entry_point)
+        except ImportError as e:
+            print(f"[error] Could not import Pryzma interpreter: {e}")
+            return False
+        except Exception as e:
+            print(f"[error] Error running script: {e}")
+            return False
+    finally:
+        sys.path = original_path
+
+    return True
 
 
-def venv_command(action, name=None):
+def venv_command(action, name=None, project_name=None):
     if action == "create":
         if not name:
             print("[venv] Please provide a name for the virtual environment.")
@@ -361,6 +402,41 @@ def venv_command(action, name=None):
                 print(f"[error] Failed to delete project: {e}")
         else:
             print("[venv] Cancelled.")
+    elif action == "link":
+        venv_link_project(name, project_name)
+
+
+def venv_link_project(venv_name, project_name):
+    venv_path = os.path.join(VENVS_PATH, venv_name)
+    project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    if not os.path.exists(venv_path):
+        print(f"[venv] Virtual environment '{venv_name}' does not exist")
+        return False
+
+    if not os.path.exists(project_path):
+        print(f"[venv] Project '{project_name}' does not exist")
+        return False
+
+    config_path = os.path.join(project_path, ".pryzma")
+    config = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            print("[venv] Warning: Could not parse existing .pryzma config")
+
+    config["venv"] = venv_path
+
+    try:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=4)
+        print(f"[venv] Linked virtual environment '{venv_name}' to project '{project_name}'")
+        return True
+    except Exception as e:
+        print(f"[venv] Error saving config: {e}")
+        return False
 
 
 def run_script(path=None, debug=False):
@@ -550,6 +626,10 @@ def build_parser():
 
     venv_subparsers.add_parser("list", help="List virtual environments")
 
+    venv_link = venv_subparsers.add_parser("link", help="Link a virtual environment to a project")
+    venv_link.add_argument("venv_name", help="Name of the virtual environment")
+    venv_link.add_argument("project_name", help="Name of the project to link to")
+
     # ictfd runner
     ictfd_parser = subparsers.add_parser("ictfd", help="Run ictfd with provided arguments")
     ictfd_parser.add_argument("ictfd_args", nargs=argparse.REMAINDER, help="Arguments for ictfd")
@@ -595,6 +675,8 @@ def main():
             venv_command("remove", getattr(args, "name", None))
         elif args.venv_command == "list":
             venv_command("list")
+        elif args.venv_command == "link":
+            venv_command("link", args.venv_name, args.project_name)
         else:
             print("[venv] Unknown venv subcommand.")
     elif args.command == "ppm":
