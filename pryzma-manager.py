@@ -561,7 +561,8 @@ def build_parser():
 
     # Config command
     config_parser = subparsers.add_parser("config", help="Manage configuration")
-    config_parser.add_argument("action", choices=["show", "update"], nargs="?", default="show", help="Show or update configuration")
+    config_subparsers = config_parser.add_subparsers(dest="config_action")
+    show_parser = config_subparsers.add_parser("show", help="Show config")
 
     return parser
 
@@ -613,11 +614,13 @@ def main():
         else:
             print("Invalid command or missing package name.")
     elif args.command == "config":
-        if args.action == "show":
+        if args.config_action == "show":
             config = load_config()
             print("Current configuration:")
             for key, value in config.items():
                 print(f"{key}: {value}")
+        else:
+            print("[config] Unknown config subcommand.")
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
