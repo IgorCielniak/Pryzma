@@ -404,6 +404,14 @@ def venv_command(action, name=None, project_name=None):
             print("[venv] Cancelled.")
     elif action == "link":
         venv_link_project(name, project_name)
+    elif action == "run":
+        print("[venv] Launching Pryzma interpreter...")
+        sys.path.append(os.path.abspath(os.path.join(VENVS_PATH, name)))
+
+        try:
+            os.system("python " + os.path.join(os.path.join(VENVS_PATH, name), "Pryzma.py"))
+        except Exception as e:
+            print(f"[error] Error launching interpreter: {e}")
 
 
 def venv_link_project(venv_name, project_name):
@@ -630,6 +638,9 @@ def build_parser():
     venv_link.add_argument("venv_name", help="Name of the virtual environment")
     venv_link.add_argument("project_name", help="Name of the project to link to")
 
+    venv_run = venv_subparsers.add_parser("run", help="Run the interpreter from a give venv")
+    venv_run.add_argument("venv_name", help="Name of the virtual environment")
+
     # ictfd runner
     ictfd_parser = subparsers.add_parser("ictfd", help="Run ictfd with provided arguments")
     ictfd_parser.add_argument("ictfd_args", nargs=argparse.REMAINDER, help="Arguments for ictfd")
@@ -677,6 +688,8 @@ def main():
             venv_command("list")
         elif args.venv_command == "link":
             venv_command("link", args.venv_name, args.project_name)
+        elif args.venv_command == "run":
+            venv_command("run", args.venv_name)
         else:
             print("[venv] Unknown venv subcommand.")
     elif args.command == "ppm":
