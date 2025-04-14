@@ -144,21 +144,37 @@ def init_project(name=None, interactive=False, template="basic", use_git=False, 
             print(f"[git] Failed to initialize Git repo: {e}")
 
 def remove_project(name):
-    path = os.path.join(PROJECTS_PATH, name)
+    project_path = os.path.join(PROJECTS_PATH, name)
 
-    if not os.path.exists(path):
+    if not os.path.exists(project_path):
         print(f"[remove] Project '{name}' does not exist.")
         return
 
-    confirm = input(f"[remove] Delete project '{name}' and all its contents? (y/n): ").lower()
-    if confirm == "y":
-        try:
-            shutil.rmtree(path)
-            print(f"[remove] Project '{name}' has been deleted.")
-        except Exception as e:
-            print(f"[error] Failed to delete project: {e}")
+    is_symlink = os.path.islink(project_path)
+    original_path = None
+
+    if is_symlink:
+        original_path = os.path.realpath(project_path)
+        message = f"[remove] Project '{name}' is a symlink to {original_path}\nDelete the symlink? (y/n): "
     else:
+        message = f"[remove] Delete project '{name}' and all its contents? (y/n): "
+
+    confirm = input(message).lower()
+    if confirm != 'y':
         print("[remove] Cancelled.")
+        return
+
+    try:
+        if is_symlink:
+            os.unlink(project_path)
+            print(f"[remove] Removed symlink to project '{name}'")
+            print(f"[remove] Original files remain at: {original_path}")
+        else:
+            shutil.rmtree(project_path)
+            print(f"[remove] Project '{name}' has been deleted.")
+    except Exception as e:
+        print(f"[error] Failed to delete project: {e}")
+
 
 def list_projects(detailed=False):
     print("[list] Listing all projects...")
@@ -216,6 +232,80 @@ def show_project_info(name):
     print(f"Path: {project_path}")
     print("No additional project metadata found.")
 
+
+def add_project(path):
+    """Add an existing project by creating a symlink in the projects directory"""
+    try:
+        abs_path = os.path.abspath(path)
+
+        if not os.path.isdir(abs_path):
+            print(f"[add] Path '{abs_path}' is not a directory or doesn't exist")
+            return False
+
+        project_name = os.path.basename(abs_path.rstrip('/'))
+
+        symlink_path = os.path.join(PROJECTS_PATH, project_name)
+
+        if os.path.exists(symlink_path):
+            print(f"[add] Project '{project_name}' already exists in projects directory")
+            return False
+
+        os.symlink(abs_path, symlink_path)
+        print(f"[add] Created symlink to project '{project_name}' at {symlink_path}")
+        return True
+
+    except OSError as e:
+        print(f"[add] Error creating symlink: {e}")
+        return False
+    except Exception as e:
+        print(f"[add] Unexpected error: {e}")
+        return False
+
+
+def get_project_entry_point(project_name):
+    config = load_config()
+    projects_path = config.get("projects_path", PROJECTS_PATH)
+    project_path = os.path.join(projects_path, project_name)
+
+    if not os.path.exists(project_path):
+        print(f"[run] Project '{project_name}' does not exist.")
+        return None
+
+    if os.path.islink(project_path):
+        project_path = os.path.realpath(project_path)
+
+    config_path = os.path.join(project_path, ".pryzma")
+    if not os.path.exists(config_path):
+        print(f"[run] No .pryzma config found in project '{project_name}'")
+        return None
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        entry_point = config.get("entry_point")
+        if not entry_point:
+            print(f"[run] No entry_point defined in .pryzma config")
+            return None
+        return os.path.join(project_path, entry_point)
+    except json.JSONDecodeError:
+        print(f"[run] Invalid .pryzma config file")
+        return None
+    except Exception as e:
+        print(f"[run] Error reading .pryzma config: {e}")
+        return None
+
+
+def run_project(name, debug=False):
+    entry_point = get_project_entry_point(name)
+    if not entry_point:
+        return False
+
+    if not os.path.exists(entry_point):
+        print(f"[run] Entry point '{entry_point}' not found")
+        return False
+
+    print(f"[run] Running project '{name}' entry point: {entry_point}")
+    return run_script(entry_point, debug)
 
 
 def venv_command(action, name=None):
@@ -438,6 +528,13 @@ def build_parser():
     proj_info = proj_subparsers.add_parser("info", help="Show project information")
     proj_info.add_argument("name", help="Project name")
 
+    proj_add = proj_subparsers.add_parser("add", help="Add an existing project by creating a symlink")
+    proj_add.add_argument("path", help="Path to the existing project directory")
+
+    proj_run = proj_subparsers.add_parser("run", help="Run the project's entry point")
+    proj_run.add_argument("name", help="Project name")
+    proj_run.add_argument("-d", "--debug", action="store_true", help="Run in debug mode")
+
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
@@ -480,6 +577,10 @@ def main():
             list_projects(args.detailed)
         elif args.proj_command == "info":
             show_project_info(args.name)
+        elif args.proj_command == "add":
+            add_project(args.path)
+        elif args.proj_command == "run":
+            run_project(args.name, args.debug)
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
