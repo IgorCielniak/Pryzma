@@ -263,9 +263,7 @@ def add_project(path):
 
 
 def get_project_entry_point(project_name):
-    config = load_config()
-    projects_path = config.get("projects_path", PROJECTS_PATH)
-    project_path = os.path.join(projects_path, project_name)
+    project_path = os.path.join(PROJECTS_PATH, project_name)
 
     if not os.path.exists(project_path):
         print(f"[run] Project '{project_name}' does not exist.")
@@ -561,6 +559,10 @@ def build_parser():
     ppm.add_argument("action", choices=["install", "list", "remove", "info", "update"])
     ppm.add_argument("package", nargs="?")
 
+    # Config command
+    config_parser = subparsers.add_parser("config", help="Manage configuration")
+    config_parser.add_argument("action", choices=["show", "update"], nargs="?", default="show", help="Show or update configuration")
+
     return parser
 
 def main():
@@ -610,6 +612,12 @@ def main():
                 ppm_update_all()
         else:
             print("Invalid command or missing package name.")
+    elif args.command == "config":
+        if args.action == "show":
+            config = load_config()
+            print("Current configuration:")
+            for key, value in config.items():
+                print(f"{key}: {value}")
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
