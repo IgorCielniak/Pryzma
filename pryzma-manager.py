@@ -26,6 +26,8 @@ TEMPLATES = {
         "description": "Basic Pryzma project",
         "files": {
             "main.pryzma": '# Your main script\n/main{\n    print "Hello, Pryzma!"\n}\n\n@main',
+            "test.pryzma": '# Test script\n/main{\n    print "Running tests..."\n}\n\n@main',
+            "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma project",
         }
     },
@@ -34,6 +36,7 @@ TEMPLATES = {
         "files": {
             "src/module.pryzma": "# Library module\n/greet{\n    return 'Hello, ' + args[0]\n}",
             "test.pryzma": '# Tests\nuse ./src/module.pryzma\n\nprint @module.greet("my name")',
+            "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma library",
             "metadata.json": '{"name": "{project_name}", "version": "1.0.0", "files": ["src/module.pryzma", "tests/test_module.pryzma"], "author": "Your name", "description": "{project_name} - library written in Pryzma", "license": "MIT"}'
         }
@@ -345,6 +348,37 @@ def run_project(name, debug=False):
         sys.path = original_path
 
     return True
+
+
+def install_dependencies(project_name):
+    """Install project dependencies from requirements.txt"""
+    project_path = os.path.join(PROJECTS_PATH, project_name)
+    requirements_file = os.path.join(project_path, "requirements.txt")
+
+    if not os.path.exists(requirements_file):
+        print(f"[install] No requirements.txt found in project '{project_name}'")
+        return False
+
+    try:
+        with open(requirements_file, 'r') as f:
+            packages = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+        if not packages:
+            print(f"[install] No dependencies found in requirements.txt")
+            return True
+
+        print(f"[install] Installing {len(packages)} dependencies for '{project_name}'...")
+
+        for package in packages:
+            print(f"[install] Installing {package}...")
+            ppm_install(package)
+
+        print("[install] Dependency installation complete")
+        return True
+
+    except Exception as e:
+        print(f"[install] Error installing dependencies: {e}")
+        return False
 
 
 def venv_command(action, name=None, project_name=None):
@@ -665,6 +699,9 @@ def build_parser():
     proj_run.add_argument("name", help="Project name")
     proj_run.add_argument("-d", "--debug", action="store_true", help="Run in debug mode")
 
+    proj_install = proj_subparsers.add_parser("install", help="Install project dependencies")
+    proj_install.add_argument("name", help="Project name")
+
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
@@ -730,6 +767,8 @@ def main():
             add_project(args.path)
         elif args.proj_command == "run":
             run_project(args.name, args.debug)
+        elif args.proj_command == "install":
+            install_dependencies(args.name)
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
