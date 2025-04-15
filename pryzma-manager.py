@@ -6,227 +6,8 @@ import shutil
 import subprocess
 import requests
 import zipfile
-import time
 import io
-import re
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
 from pathlib import Path
-
-
-class ProjectDashboard:
-    def __init__(self, project_name):
-        self.project_name = project_name
-        self.project_path = os.path.join(PROJECTS_PATH, project_name)
-        self.console = Console()
-        self.metrics = {
-            'size': {'files': 0, 'lines': 0},
-            'issues': {'todos': 0, 'fixmes': 0, 'unused': 0},
-            'complexity': {'average': 0, 'max': 0},
-            'dependencies': {'direct': 0, 'transitive': [], 'missing': []},
-            'health': 0,
-            'last_updated': ''
-        }
-
-    def collect_metrics(self):
-        """Gather all static project metrics"""
-        self._count_project_size()
-        self._find_code_issues()
-        self._calculate_complexity()
-        self._count_dependencies()
-        self._calculate_health_score()
-        self.metrics['last_updated'] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    def _count_project_size(self):
-        """Count project files and lines of code"""
-        file_count = 0
-        line_count = 0
-
-        for root, _, files in os.walk(self.project_path):
-            for file in files:
-                if file.endswith('.pryzma'):
-                    file_count += 1
-                    with open(os.path.join(root, file), 'r') as f:
-                        line_count += len(f.readlines())
-
-        self.metrics['size'] = {
-            'files': file_count,
-            'lines': line_count
-        }
-
-    def _find_code_issues(self):
-        """Find TODOs, FIXMEs, and unused functions"""
-        todos = 0
-        fixmes = 0
-        defined_functions = set()
-        called_functions = set()
-
-        for root, _, files in os.walk(self.project_path):
-            for file in files:
-                if file.endswith('.pryzma'):
-                    with open(os.path.join(root, file), 'r') as f:
-                        content = f.read()
-                        todos += content.count('TODO')
-                        fixmes += content.count('FIXME')
-
-                        func_defs = re.findall(r'/\w+{', content)
-                        defined_functions.update([f[1:-1] for f in func_defs])
-
-                        func_calls = re.findall(r'@\w+', content)
-                        called_functions.update([f[1:] for f in func_calls])
-
-        unused = len(defined_functions - called_functions)
-        self.metrics['issues'] = {
-            'todos': todos,
-            'fixmes': fixmes,
-            'unused': unused
-        }
-
-    def _calculate_complexity(self):
-        """Calculate code complexity metrics"""
-        complexities = []
-
-        for root, _, files in os.walk(self.project_path):
-            for file in files:
-                if file.endswith('.pryzma'):
-                    with open(os.path.join(root, file), 'r') as f:
-                        content = f.read()
-                        complexity = (
-                            content.count('if') +
-                            content.count('for') +
-                            content.count('while')
-                        )
-                        complexities.append(complexity)
-
-        if complexities:
-            self.metrics['complexity'] = {
-                'average': sum(complexities) / len(complexities),
-                'max': max(complexities)
-            }
-
-    def _count_dependencies(self):
-        """Analyze project dependencies"""
-        req_file = os.path.join(self.project_path, "requirements.txt")
-        deps = []
-
-        if os.path.exists(req_file):
-            with open(req_file, 'r') as f:
-                deps = [line.strip() for line in f
-                       if line.strip() and not line.startswith('#')]
-
-        installed_deps = []
-        if os.path.exists(PACKAGES_DIR):
-            installed_deps = os.listdir(PACKAGES_DIR)
-
-        self.metrics['dependencies'] = {
-            'direct': len(deps),
-            'transitive': installed_deps,
-            'missing': [d for d in deps if d not in installed_deps]
-        }
-
-    def _calculate_health_score(self):
-        """Calculate health score based on static analysis"""
-        issue_penalty = min(50,
-            self.metrics['issues']['todos'] * 2 +
-            self.metrics['issues']['fixmes'] * 5 +
-            self.metrics['issues']['unused'] * 3
-        )
-        complexity_penalty = min(30, self.metrics['complexity']['average'] * 2)
-        dep_penalty = 10 if self.metrics['dependencies']['missing'] else 0
-
-        self.metrics['health'] = max(0, 100 - issue_penalty - complexity_penalty - dep_penalty)
-
-    def render(self):
-        """Create an improved dashboard UI with better spacing"""
-        health_color = "green" if self.metrics['health'] >= 75 else "yellow" if self.metrics['health'] >= 50 else "red"
-        health_bar = f"[{health_color}]{'█' * int(self.metrics['health'] / 2.5)}{'░' * (40 - int(self.metrics['health'] / 2.5))}[/]"
-
-        health_table = Table(title="\n[bold]📊 CODE HEALTH[/]", show_header=False, box=None, padding=(0,2))
-        health_table.add_row("Health Score", f"[bold]{self.metrics['health']:.1f}/100[/]")
-        health_table.add_row(health_bar, "")
-
-        size_table = Table(
-            title="[bold]📦 PROJECT SIZE[/]",
-            box=None,
-            padding=(0,2),
-            min_width=20
-        )
-        size_table.add_column("Metric", justify="left", style="bold")
-        size_table.add_column("Value", justify="right")
-        size_table.add_row("Files", f"[cyan]{self.metrics['size']['files']}[/]")
-        size_table.add_row("Lines", f"[cyan]{self.metrics['size']['lines']}[/]")
-
-        issue_table = Table(
-            title="[bold]⚠️ CODE ISSUES[/]",
-            box=None,
-            padding=(0,2),
-            min_width=20
-        )
-        issue_table.add_column("Type", justify="left", style="bold")
-        issue_table.add_column("Count", justify="right")
-        issue_table.add_row("TODOs", f"{self.metrics['issues']['todos']}")
-        issue_table.add_row("FIXMEs", f"{self.metrics['issues']['fixmes']}")
-        issue_table.add_row("Unused", f"{self.metrics['issues']['unused']}")
-
-        complexity_table = Table(
-            title="[bold]🧠 COMPLEXITY[/]",
-            box=None,
-            padding=(0,2),
-            min_width=20
-        )
-        complexity_table.add_column("Metric", justify="left", style="bold")
-        complexity_table.add_column("Value", justify="right")
-        complexity_table.add_row("Average", f"{self.metrics['complexity']['average']:.1f}")
-        complexity_table.add_row("Max", f"{self.metrics['complexity']['max']}")
-        complexity_table.add_row("", "")
-
-        dep_table = Table(
-            title="[bold]📦 DEPENDENCIES[/]",
-            box=None,
-            padding=(0,2),
-            min_width=20
-        )
-        dep_table.add_column("Type", justify="left", style="bold")
-        dep_table.add_column("Count", justify="right")
-        dep_table.add_row("Required", f"{self.metrics['dependencies']['direct']}")
-        dep_table.add_row("Installed", f"[green]{len(self.metrics['dependencies']['transitive'])}[/]")
-        dep_table.add_row("Missing", f"[red]{len(self.metrics['dependencies']['missing'])}[/]")
-
-        main_grid = Table.grid(expand=True, padding=1)
-        main_grid.add_column(ratio=1)
-        main_grid.add_column(ratio=1)
-        main_grid.add_row(
-            Panel(health_table, border_style=health_color),
-            Panel(size_table, border_style="cyan")
-        )
-        main_grid.add_row(
-            Panel(issue_table, border_style="yellow"),
-            Panel(complexity_table, border_style="blue")
-        )
-
-        full_layout = Table.grid(expand=True)
-        full_layout.add_row(main_grid)
-        full_layout.add_row(Panel(dep_table, border_style="green"))
-
-        if self.metrics['dependencies']['missing']:
-            missing_deps = "\n".join(f"[red]• {dep}[/]" for dep in self.metrics['dependencies']['missing'])
-            full_layout.add_row(
-                Panel(missing_deps,
-                     title="[bold red]Missing Dependencies[/]",
-                     border_style="red",
-                     padding=(1,2))
-            )
-
-        return Panel(
-            full_layout,
-            title=f"[bold blue]Project Dashboard: {self.project_name}[/]",
-            subtitle=f"Last analyzed: {self.metrics['last_updated']}",
-            padding=(1, 2),
-            border_style="blue"
-        )
-
 
 PRYZMA_PATH = os.path.abspath(os.path.dirname(__file__))
 PROJECTS_PATH = os.path.abspath(os.path.join(PRYZMA_PATH, "projects"))
@@ -921,9 +702,6 @@ def build_parser():
     proj_install = proj_subparsers.add_parser("install", help="Install project dependencies")
     proj_install.add_argument("name", help="Project name")
 
-    proj_dashboard = proj_subparsers.add_parser("dashboard", help="Show project dashboard")
-    proj_dashboard.add_argument("name", help="Project name")
-
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
@@ -969,7 +747,6 @@ def build_parser():
     config_subparsers = config_parser.add_subparsers(dest="config_action")
     show_parser = config_subparsers.add_parser("show", help="Show config")
 
-
     return parser
 
 def main():
@@ -992,14 +769,6 @@ def main():
             run_project(args.name, args.debug)
         elif args.proj_command == "install":
             install_dependencies(args.name)
-        elif args.proj_command == "dashboard":
-            if not os.path.exists(os.path.join(PROJECTS_PATH, args.name)):
-                print(f"[proj] Project '{args.name}' does not exist")
-                return
-            dashboard = ProjectDashboard(args.name)
-            dashboard.collect_metrics()
-            console = Console()
-            console.print(dashboard.render())
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
