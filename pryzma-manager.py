@@ -510,6 +510,24 @@ def run_script(path=None, debug=False):
             print(f"[error] Error launching interpreter: {e}")
 
 
+def compile_script(path):
+    config = load_config()
+    interpreter_path = config.get("interpreter_path", "Pryzma-programming-language")
+
+    if not os.path.exists(os.path.join(interpreter_path, "Pryzmac.py")):
+        print(f"[run] Compiler not found at '{interpreter_path}'")
+        return
+
+    print("[run] Launching Pryzma compiler...")
+    sys.path.append(os.path.abspath(interpreter_path))
+
+    try:
+        os.system("python " + os.path.join(interpreter_path, "Pryzmac.py") + " " + path)
+    except Exception as e:
+        print(f"[error] Error launching compiler: {e}")
+
+
+
 def ppm_install(package_name):
     os.makedirs(PACKAGES_DIR, exist_ok=True)
     package_path = os.path.join(PACKAGES_DIR, package_name)
@@ -652,6 +670,10 @@ def build_parser():
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
     run_parser.add_argument("-d", "--debug", action="store_true", help="Flag used to run in debug mode")
 
+    # Compile command
+    compile_parser = subparsers.add_parser("compile", help="Compile a Pryzma script")
+    compile_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
+
     # Venv group
     venv_parser = subparsers.add_parser("venv", help="Manage Pryzma virtual environments")
     venv_subparsers = venv_parser.add_subparsers(dest="venv_command")
@@ -712,6 +734,8 @@ def main():
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
         run_script(args.path, args.debug)
+    elif args.command == "compile":
+        compile_script(args.path)
     elif args.command == "venv":
         if args.venv_command == "create":
             venv_command("create", getattr(args, "name", None))
