@@ -404,6 +404,8 @@ def venv_command(action, name=None, project_name=None):
             print("[venv] Cancelled.")
     elif action == "link":
         venv_link_project(name, project_name)
+    elif action == "unlink":
+        venv_unlink_project(name)
     elif action == "run":
         print("[venv] Launching Pryzma interpreter...")
         sys.path.append(os.path.abspath(os.path.join(VENVS_PATH, name)))
@@ -441,6 +443,34 @@ def venv_link_project(venv_name, project_name):
         with open(config_path, "w") as f:
             json.dump(config, f, indent=4)
         print(f"[venv] Linked virtual environment '{venv_name}' to project '{project_name}'")
+        return True
+    except Exception as e:
+        print(f"[venv] Error saving config: {e}")
+        return False
+
+
+def venv_unlink_project(project_name):
+    project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    if not os.path.exists(project_path):
+        print(f"[venv] Project '{project_name}' does not exist")
+        return False
+
+    config_path = os.path.join(project_path, ".pryzma")
+    config = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            print("[venv] Warning: Could not parse existing .pryzma config")
+
+    config["venv"] = None
+
+    try:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=4)
+        print(f"[venv] Unlinked virtual environment from project '{project_name}'")
         return True
     except Exception as e:
         print(f"[venv] Error saving config: {e}")
@@ -638,6 +668,9 @@ def build_parser():
     venv_link.add_argument("venv_name", help="Name of the virtual environment")
     venv_link.add_argument("project_name", help="Name of the project to link to")
 
+    venv_unlink = venv_subparsers.add_parser("unlink", help="Unlink a virtual environment from a project")
+    venv_unlink.add_argument("project_name", help="Name of the project to unlink")
+
     venv_run = venv_subparsers.add_parser("run", help="Run the interpreter from a give venv")
     venv_run.add_argument("venv_name", help="Name of the virtual environment")
 
@@ -688,6 +721,8 @@ def main():
             venv_command("list")
         elif args.venv_command == "link":
             venv_command("link", args.venv_name, args.project_name)
+        elif args.venv_command == "unlink":
+            venv_command("unlink", args.project_name)
         elif args.venv_command == "run":
             venv_command("run", args.venv_name)
         else:
