@@ -61,6 +61,74 @@ def load_config():
     print(f"[config] No config file found at {CONFIG_PATHS[0]} or {CONFIG_PATHS[1]}")
     return {}
 
+
+def set_config_value(key, value, use_global=False):
+    """Set a configuration value in either local or global config"""
+    config_path = CONFIG_PATHS[1] if use_global else CONFIG_PATHS[0]
+
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+    config = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            print(f"[config] Warning: Existing config at {config_path} is invalid")
+
+    if value.lower() == 'true':
+        value = True
+    elif value.lower() == 'false':
+        value = False
+    elif value.isdigit():
+        value = int(value)
+    elif value.replace('.', '', 1).isdigit():
+        value = float(value)
+
+    config[key] = value
+
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        print(f"[config] Set {key} = {value} in {'global' if use_global else 'local'} config")
+        return True
+    except Exception as e:
+        print(f"[config] Error saving config: {e}")
+        return False
+
+
+def remove_config_key(key, use_global=False):
+    """Remove a key from configuration"""
+    config_path = CONFIG_PATHS[1] if use_global else CONFIG_PATHS[0]
+
+    if not os.path.exists(config_path):
+        print(f"[config] No {'global' if use_global else 'local'} config file found")
+        return False
+
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        if key not in config:
+            print(f"[config] Key '{key}' not found in config")
+            return False
+
+        removed_value = config.pop(key)
+
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        print(f"[config] Removed '{key}' (was: {removed_value})")
+        return True
+
+    except json.JSONDecodeError:
+        print(f"[config] Error: Invalid JSON in config file")
+        return False
+    except Exception as e:
+        print(f"[config] Error removing key: {e}")
+        return False
+
+
 def init_main_env():
     for path in [VENVS_PATH, PROJECTS_PATH]:
         if not os.path.exists(path):
@@ -747,6 +815,15 @@ def build_parser():
     config_subparsers = config_parser.add_subparsers(dest="config_action")
     show_parser = config_subparsers.add_parser("show", help="Show config")
 
+    set_parser = config_subparsers.add_parser("set", help="Set configuration value")
+    set_parser.add_argument("key", help="Configuration key to set")
+    set_parser.add_argument("value", help="Value to set")
+    set_parser.add_argument("--global", action="store_true", help="Save to global config")
+
+    remove_parser = config_subparsers.add_parser("remove", help="Remove a configuration key")
+    remove_parser.add_argument("key", help="Key to remove")
+    remove_parser.add_argument("--global", action="store_true", help="Remove from global config")
+
     return parser
 
 def main():
@@ -812,6 +889,10 @@ def main():
             print("Current configuration:")
             for key, value in config.items():
                 print(f"{key}: {value}")
+        elif args.config_action == "set":
+            set_config_value(args.key, args.value, getattr(args, "global", False))
+        elif args.config_action == "remove":
+            remove_config_key(args.key, getattr(args, "global", False))
         else:
             print("[config] Unknown config subcommand.")
     elif args.command and args.command.startswith("ictfd"):
