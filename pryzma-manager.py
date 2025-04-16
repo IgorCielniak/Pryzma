@@ -7,6 +7,7 @@ import subprocess
 import requests
 import zipfile
 import io
+import importlib
 from pathlib import Path
 
 PRYZMA_PATH = os.path.abspath(os.path.dirname(__file__))
@@ -19,7 +20,7 @@ CONFIG_PATHS = [
 
 
 PACKAGES_DIR = os.path.join(PRYZMA_PATH, "Pryzma-programming-language", "packages")
-
+PLUGINS_DIR = os.path.abspath(os.path.join(PRYZMA_PATH, "plugins"))
 
 TEMPLATES = {
     "basic": {
@@ -51,6 +52,40 @@ __pycache__/
 *.swo
 """
 
+def load_plugins(main_parser):
+    """Load plugins that add top-level commands"""
+    if not os.path.exists(PLUGINS_DIR):
+        return
+
+    if not any(isinstance(action, argparse._SubParsersAction)
+               for action in main_parser._actions):
+        main_parser.add_subparsers(title='commands')
+
+    subparsers_action = None
+    for action in main_parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            subparsers_action = action
+            break
+
+    if not subparsers_action:
+        print("[plugins] Couldn't create command group")
+        return
+
+    for plugin_name in os.listdir(PLUGINS_DIR):
+        plugin_path = os.path.join(PLUGINS_DIR, plugin_name, "commands.py")
+        if os.path.exists(plugin_path):
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"plugins.{plugin_name}", plugin_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                if hasattr(module, "register_commands"):
+                    module.register_commands(subparsers_action)
+                    print(f"[plugins] Loaded {plugin_name}")
+
+            except Exception as e:
+                print(f"[plugins] Error loading {plugin_name}: {str(e)}")
 
 def load_config():
     for path in CONFIG_PATHS:
@@ -829,7 +864,14 @@ def build_parser():
 def main():
     init_main_env()
     parser = build_parser()
+
+    load_plugins(parser)
+
     args = parser.parse_args()
+
+    if hasattr(args, 'func'):
+        args.func(args)
+        return
 
     if args.command == "proj":
         if args.proj_command == "init":
