@@ -21,6 +21,7 @@ CONFIG_PATHS = [
 
 PACKAGES_DIR = os.path.join(PRYZMA_PATH, "Pryzma-programming-language", "packages")
 PLUGINS_DIR = os.path.abspath(os.path.join(PRYZMA_PATH, "plugins"))
+PLUGIN_DISABLED_PREFIX = "DISABLED_"
 
 TEMPLATES = {
     "basic": {
@@ -53,8 +54,9 @@ __pycache__/
 """
 
 def load_plugins(main_parser):
-    """Load plugins that add top-level commands"""
+    """Load all enabled plugins that have valid metadata and command files"""
     if not os.path.exists(PLUGINS_DIR):
+        print("[plugins] No plugins directory found")
         return
 
     if not any(isinstance(action, argparse._SubParsersAction)
@@ -68,24 +70,152 @@ def load_plugins(main_parser):
             break
 
     if not subparsers_action:
-        print("[plugins] Couldn't create command group")
+        print("[plugins] Warning: Couldn't create command group for plugins")
         return
 
-    for plugin_name in os.listdir(PLUGINS_DIR):
-        plugin_path = os.path.join(PLUGINS_DIR, plugin_name, "commands.py")
+    loaded_count = 0
+    skipped_count = 0
+
+    for plugin_name in sorted(os.listdir(PLUGINS_DIR)):
+        if plugin_name.startswith(PLUGIN_DISABLED_PREFIX):
+            skipped_count += 1
+            continue
+
+        plugin_dir = os.path.join(PLUGINS_DIR, plugin_name)
+        metadata_path = os.path.join(plugin_dir, "metadata.json")
+        commands_path = os.path.join(plugin_dir, "commands.py")
+
+        if not os.path.exists(metadata_path):
+            print(f"[plugins] Skipping '{plugin_name}': missing metadata.json")
+            skipped_count += 1
+            continue
+
+        if not os.path.exists(commands_path):
+            print(f"[plugins] Skipping '{plugin_name}': missing commands.py")
+            skipped_count += 1
+            continue
+
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            if not isinstance(metadata, dict):
+                print(f"[plugins] Skipping '{plugin_name}': invalid metadata format")
+                skipped_count += 1
+                continue
+
+            spec = importlib.util.spec_from_file_location(
+                f"plugins.{plugin_name}", commands_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            if hasattr(module, "register_commands"):
+                module.register_commands(subparsers_action)
+
+                version = metadata.get("version", "?.?.?")
+                print(f"[plugins] Loaded {plugin_name} v{version}")
+                loaded_count += 1
+            else:
+                print(f"[plugins] Skipping '{plugin_name}': no register_commands()")
+                skipped_count += 1
+
+        except json.JSONDecodeError:
+            print(f"[plugins] Skipping '{plugin_name}': invalid metadata.json")
+            skipped_count += 1
+        except ImportError as e:
+            print(f"[plugins] Failed to import '{plugin_name}': {str(e)}")
+            skipped_count += 1
+        except Exception as e:
+            print(f"[plugins] Error loading '{plugin_name}': {str(e)}")
+            skipped_count += 1
+
+    print(f"[plugins] Loaded {loaded_count} plugins, skipped {skipped_count}")
+
+def list_plugins(show_all=False):
+    """List all available plugins"""
+    if not os.path.exists(PLUGINS_DIR):
+        print("No plugins directory found")
+        return []
+
+    plugins = []
+    for name in sorted(os.listdir(PLUGINS_DIR)):
+        disabled = name.startswith(PLUGIN_DISABLED_PREFIX)
+        real_name = name[len(PLUGIN_DISABLED_PREFIX):] if disabled else name
+        plugin_path = os.path.join(PLUGINS_DIR, name, "commands.py")
+
         if os.path.exists(plugin_path):
+            plugins.append({
+                "name": real_name,
+                "disabled": disabled,
+                "path": plugin_path
+            })
+
+    if not plugins:
+        print("No plugins installed")
+        return []
+
+    print("Available plugins:")
+    for plugin in plugins:
+        status = "DISABLED" if plugin["disabled"] else "ENABLED"
+        print(f" - {plugin['name']} [{status}]")
+
+    return plugins
+
+def toggle_plugin(plugin_name, enable=True):
+    """Enable or disable a plugin"""
+    plugin_dir = os.path.join(PLUGINS_DIR, plugin_name)
+    disabled_dir = os.path.join(PLUGINS_DIR, f"{PLUGIN_DISABLED_PREFIX}{plugin_name}")
+
+    if enable:
+        if os.path.exists(disabled_dir):
+            os.rename(disabled_dir, plugin_dir)
+            print(f"Enabled plugin: {plugin_name}")
+            return True
+    else:
+        if os.path.exists(plugin_dir):
+            os.rename(plugin_dir, disabled_dir)
+            print(f"Disabled plugin: {plugin_name}")
+            return True
+
+    print(f"Plugin not found: {plugin_name}")
+    return False
+
+def show_plugin_info(plugin_name):
+    """Show information from plugin's metadata.json"""
+    for prefix in ("", PLUGIN_DISABLED_PREFIX):
+        plugin_dir = os.path.join(PLUGINS_DIR, f"{prefix}{plugin_name}")
+        metadata_path = os.path.join(plugin_dir, "metadata.json")
+
+        if os.path.exists(metadata_path):
             try:
-                spec = importlib.util.spec_from_file_location(
-                    f"plugins.{plugin_name}", plugin_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
 
-                if hasattr(module, "register_commands"):
-                    module.register_commands(subparsers_action)
-                    print(f"[plugins] Loaded {plugin_name}")
+                print(f"\nPlugin: {plugin_name}")
+                print(f"Status: {'Disabled' if prefix else 'Enabled'}")
+                print("-" * 40)
 
+                for field in ["author", "version", "description", "license"]:
+                    if field in metadata:
+                        print(f"{field.capitalize():<12}: {metadata[field]}")
+
+                custom_fields = set(metadata.keys()) - {"author", "version", "description", "license"}
+                if custom_fields:
+                    print("\nAdditional Info:")
+                    for field in sorted(custom_fields):
+                        print(f"{field.capitalize():<12}: {metadata[field]}")
+
+                return True
+
+            except json.JSONDecodeError:
+                print(f"Error: Invalid metadata.json in {plugin_name}")
+                return False
             except Exception as e:
-                print(f"[plugins] Error loading {plugin_name}: {str(e)}")
+                print(f"Error reading plugin: {str(e)}")
+                return False
+
+    print(f"Plugin not found: {plugin_name}")
+    return False
 
 def load_config():
     for path in CONFIG_PATHS:
@@ -771,7 +901,7 @@ def ppm_update_all():
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="pryzma-manager", description="Manage Pryzma projects and environments")
+    parser = argparse.ArgumentParser(prog="pryzma-manager", description="Manage Pryzma projects and environments and more")
     subparsers = parser.add_subparsers(dest="command")
 
     # Project group
@@ -841,7 +971,7 @@ def build_parser():
     ictfd_parser.add_argument("ictfd_args", nargs=argparse.REMAINDER, help="Arguments for ictfd")
 
     #ppm parser
-    ppm = subparsers.add_parser("ppm")
+    ppm = subparsers.add_parser("ppm", help="Pryzma package manager")
     ppm.add_argument("action", choices=["install", "list", "remove", "info", "update"])
     ppm.add_argument("package", nargs="?")
 
@@ -858,6 +988,20 @@ def build_parser():
     remove_parser = config_subparsers.add_parser("remove", help="Remove a configuration key")
     remove_parser.add_argument("key", help="Key to remove")
     remove_parser.add_argument("--global", action="store_true", help="Remove from global config")
+
+    plugin_parser = subparsers.add_parser("plugin", help="Manage plugins")
+    plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command")
+
+    list_parser = plugin_subparsers.add_parser("list", help="List plugins")
+    list_parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed plugin info")
+
+    toggle_parser = plugin_subparsers.add_parser("toggle", help="Enable/disable plugin")
+    toggle_parser.add_argument("name", help="Plugin name")
+    toggle_parser.add_argument("--enable", action="store_true", help="Enable plugin")
+    toggle_parser.add_argument("--disable", action="store_true", help="Disable plugin")
+
+    info_parser = plugin_subparsers.add_parser("info", help="Show plugin details")
+    info_parser.add_argument("name", help="Plugin name")
 
     return parser
 
@@ -937,6 +1081,31 @@ def main():
             remove_config_key(args.key, getattr(args, "global", False))
         else:
             print("[config] Unknown config subcommand.")
+    elif args.command == "plugin":
+        if args.plugin_command == "list":
+            plugins = list_plugins()
+            if args.verbose:
+                print("\nDetailed info:")
+                for plugin in plugins:
+                    show_plugin_info(plugin["name"])
+                    print()
+            return
+        elif args.plugin_command == "toggle":
+            if args.enable:
+                toggle_plugin(args.name, enable=True)
+            elif args.disable:
+                toggle_plugin(args.name, enable=False)
+            else:
+                plugins = list_plugins(show_all=True)
+                for p in plugins:
+                    if p["name"] == args.name:
+                        toggle_plugin(args.name, enable=p["disabled"])
+                        return
+                print(f"Plugin not found: {args.name}")
+            return
+        elif args.plugin_command == "info":
+            show_plugin_info(args.name)
+            return
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
