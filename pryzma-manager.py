@@ -28,19 +28,22 @@ TEMPLATES = {
         "description": "Basic Pryzma project",
         "files": {
             "main.pryzma": '# Your main script\n/main{\n    print "Hello, Pryzma!"\n}\n\n@main',
-            "test.pryzma": '# Test script\n/main{\n    print "Running tests..."\n}\n\n@main',
             "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma project",
+            "tests/test.test": "echo test",
+            "tests/test.expected": "test"
         }
     },
     "lib": {
         "description": "Library project template",
         "files": {
             "src/module.pryzma": "# Library module\n/greet{\n    return 'Hello, ' + args[0]\n}",
-            "test.pryzma": '# Tests\nuse ./src/module.pryzma\n\nprint @module.greet("my name")',
             "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma library",
-            "metadata.json": '{"name": "{project_name}", "version": "1.0.0", "files": ["src/module.pryzma", "tests/test_module.pryzma"], "author": "Your name", "description": "{project_name} - library written in Pryzma", "license": "MIT"}'
+            "metadata.json": '{"name": "{project_name}", "version": "1.0.0", "files": ["src/module.pryzma", "tests/test.pryzma", "tests/test.test", "tests/test.expected"], "author": "Your name", "description": "{project_name} - library written in Pryzma", "license": "MIT"}',
+            "tests/test.test": f"python {os.path.join(PRYZMA_PATH, 'Pryzma-programming-language/Pryzma.py')} tests/test.pryzma",
+            "tests/test.pryzma": '# Tests\nuse ./src/module.pryzma\n\nprint @module.greet("my name")',
+            "tests/test.expected": "Hello, my name"
         }
     },
 }
@@ -582,6 +585,20 @@ def run_project(name, debug=False):
 
     return True
 
+def test_project(args):
+    project_path = os.path.join(PRYZMA_PATH, 'projects', args.proj_name)
+    test_script = os.path.join(PRYZMA_PATH, 'tools', 'test.py')
+
+    if not os.path.exists(project_path):
+        print(f"Error: Project directory {project_path} does not exist")
+        sys.exit(1)
+
+    if not os.path.exists(test_script):
+        print(f"Error: Test script {test_script} does not exist")
+        sys.exit(1)
+
+    os.chdir(project_path)
+    os.system(f"python {test_script}")
 
 def install_dependencies(project_name):
     """Install project dependencies from requirements.txt"""
@@ -935,6 +952,9 @@ def build_parser():
     proj_install = proj_subparsers.add_parser("install", help="Install project dependencies")
     proj_install.add_argument("name", help="Project name")
 
+    test_parser = proj_subparsers.add_parser('test')
+    test_parser.add_argument('proj_name', help='Name of the project to test')
+
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
@@ -1032,6 +1052,8 @@ def main():
             run_project(args.name, args.debug)
         elif args.proj_command == "install":
             install_dependencies(args.name)
+        elif args.proj_command == 'test':
+            test_project(args)
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
