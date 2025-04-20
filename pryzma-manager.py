@@ -14,7 +14,7 @@ PRYZMA_PATH = os.path.abspath(os.path.dirname(__file__))
 PROJECTS_PATH = os.path.abspath(os.path.join(PRYZMA_PATH, "projects"))
 VENVS_PATH = os.path.abspath(os.path.join(PRYZMA_PATH, "venvs"))
 CONFIG_PATHS = [
-    os.path.abspath("./config.json"),
+    os.path.join(PRYZMA_PATH, "config.json"),
     os.path.expanduser("~/.pryzma/config.json")
 ]
 
