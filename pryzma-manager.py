@@ -31,7 +31,8 @@ TEMPLATES = {
             "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma project",
             "tests/test.test": "echo test",
-            "tests/test.expected": "test"
+            "tests/test.expected": "test",
+            "notes": ""
         }
     },
     "lib": {
@@ -43,7 +44,8 @@ TEMPLATES = {
             "metadata.json": '{"name": "{project_name}", "version": "1.0.0", "files": ["src/module.pryzma", "tests/test.pryzma", "tests/test.test", "tests/test.expected"], "author": "Your name", "description": "{project_name} - library written in Pryzma", "license": "MIT"}',
             "tests/test.test": f"python {os.path.join(PRYZMA_PATH, 'Pryzma-programming-language/Pryzma.py')} tests/test.pryzma",
             "tests/test.pryzma": '# Tests\nuse ./src/module.pryzma\n\nprint @module.greet("my name")',
-            "tests/test.expected": "Hello, my name"
+            "tests/test.expected": "Hello, my name",
+            "notes": ""
         }
     },
 }
@@ -51,7 +53,8 @@ TEMPLATES = {
 
 GITIGNORE_TEMPLATE = """
 .gitignore
-__pycache__/
+*__pycache__
+notes
 *.swp
 *.swo
 """
