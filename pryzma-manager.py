@@ -922,16 +922,54 @@ def notes_list(proj_name):
     if not os.path.exists(proj_path):
         print(f"[notes] Project '{proj_name}' doesn't exist")
         return
+
     notes_file = os.path.join(PROJECTS_PATH, proj_name, "notes")
     if not os.path.exists(notes_file):
         print(f"[notes] Notes file for project '{proj_name}' doesn't exist")
         return
+
     with open(notes_file) as f:
         notes = f.read().splitlines()
+
     notes = list(filter(None, map(str.strip, notes)))
+
     print(f"Notes for project '{proj_name}':")
+
     for i, note in enumerate(notes):
         print(f"[{i+1}] {note}")
+
+def notes_remove(proj_name, line):
+    proj_path = os.path.join(PROJECTS_PATH, proj_name)
+    if not os.path.exists(proj_path):
+        print(f"[notes] Project '{proj_name}' doesn't exist")
+        return
+    notes_file = os.path.join(PROJECTS_PATH, proj_name, "notes")
+    if not os.path.exists(notes_file):
+        print(f"[notes] Notes file for project '{proj_name}' doesn't exist")
+        return
+
+    with open(notes_file) as f:
+        all_lines = f.read().splitlines()
+
+    non_empty_lines = [(i, ln) for i, ln in enumerate(all_lines) if ln.strip()]
+
+    try:
+        line_num = int(line)
+        if line_num < 1 or line_num > len(non_empty_lines):
+            print(f"[notes] Invalid line number {line_num} (valid range: 1-{len(non_empty_lines)})")
+            return
+
+        original_index, note_to_remove = non_empty_lines[line_num-1]
+
+        all_lines.pop(original_index)
+
+        with open(notes_file, "w") as f:
+            f.write("\n".join(all_lines))
+
+        print(f"[notes] Removed note: {note_to_remove}")
+
+    except ValueError:
+        print(f"[notes] Line number must be an integer, got '{line}'")
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="pryzma-manager", description="Manage Pryzma projects and environments and more")
@@ -1046,6 +1084,10 @@ def build_parser():
     list_parser = notes_subparsers.add_parser("list", help="List all notes for a given project")
     list_parser.add_argument("project_name", help="Name of the project")
 
+    notes_remove_parser = notes_subparsers.add_parser("remove", help="Remove notes from a given project")
+    notes_remove_parser.add_argument("project_name", help="Name of the project")
+    notes_remove_parser.add_argument("line", help="Line number")
+
     return parser
 
 def main():
@@ -1154,9 +1196,10 @@ def main():
     elif args.command == "notes":
         if args.notes_action == "list":
             notes_list(args.project_name)
+        elif args.notes_action == "remove":
+            notes_remove(args.project_name, args.line)
         else:
             print("[notes] Unknown notes subcommand.")
-
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
