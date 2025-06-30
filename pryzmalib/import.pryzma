@@ -1,0 +1,7 @@
+preproc=nan
+
+use ./module.pryzma
+
+result = @test("gg")
+
+print result
