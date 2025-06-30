@@ -140,7 +140,7 @@ def load_plugins(main_parser):
 def list_plugins(show_all=False):
     """List all available plugins"""
     if not os.path.exists(PLUGINS_DIR):
-        print("No plugins directory found")
+        print("[plugins] No plugins directory found")
         return []
 
     plugins = []
@@ -157,7 +157,7 @@ def list_plugins(show_all=False):
             })
 
     if not plugins:
-        print("No plugins installed")
+        print("[plugins] No plugins installed")
         return []
 
     print("Available plugins:")
@@ -936,6 +936,10 @@ def notes_list(proj_name):
 
     notes = list(filter(None, map(str.strip, notes)))
 
+    if len(notes) < 1:
+        print(f"[notes] No notes found for project '{proj_name}'.")
+        return
+
     print(f"Notes for project '{proj_name}':")
 
     for i, note in enumerate(notes):
@@ -973,6 +977,28 @@ def notes_remove(proj_name, line):
 
     except ValueError:
         print(f"[notes] Line number must be an integer, got '{line}'")
+
+
+def notes_add(proj_name, note):
+    proj_path = os.path.join(PROJECTS_PATH, proj_name)
+    if not os.path.exists(proj_path):
+        print(f"[notes] Project '{proj_name}' doesn't exist")
+        return
+    notes_file = os.path.join(PROJECTS_PATH, proj_name, "notes")
+    if not os.path.exists(notes_file):
+        print(f"[notes] Notes file for project '{proj_name}' doesn't exist")
+        return
+
+    with open(notes_file) as f:
+        all_lines = f.read().splitlines()
+
+    all_lines.append(note)
+
+    with open(notes_file, "w") as f:
+        f.write("\n".join(all_lines))
+
+    print(f"[notes] Added note '{note}' to project '{proj_name}'")
+
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="pryzma-manager", description="Manage Pryzma projects and environments and more")
@@ -1091,6 +1117,10 @@ def build_parser():
     notes_remove_parser.add_argument("project_name", help="Name of the project")
     notes_remove_parser.add_argument("line", help="Line number")
 
+    notes_add_parser = notes_subparsers.add_parser("add", help="Adds a note to a given project")
+    notes_add_parser.add_argument("project_name", help="Name of the project")
+    notes_add_parser.add_argument("note", help="note content")
+
     return parser
 
 def main():
@@ -1201,6 +1231,8 @@ def main():
             notes_list(args.project_name)
         elif args.notes_action == "remove":
             notes_remove(args.project_name, args.line)
+        elif args.notes_action == "add":
+            notes_add(args.project_name, args.note)
         else:
             print("[notes] Unknown notes subcommand.")
     elif args.command and args.command.startswith("ictfd"):
