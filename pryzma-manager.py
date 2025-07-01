@@ -30,8 +30,8 @@ TEMPLATES = {
             "main.pryzma": '# Your main script\n/main{\n    print "Hello, Pryzma!"\n}\n\n@main',
             "requirements.txt": '# Add one package per line\n',
             "README.md": "# {project_name}\n\nA Pryzma project",
-            "tests/test.test": "echo test",
-            "tests/test.expected": "test",
+            "tests/test.test": f"python {os.path.join(PRYZMA_PATH, 'Pryzma-programming-language/Pryzma.py')} main.pryzma",
+            "tests/test.expected": "Hello, Pryzma!",
             "notes": ""
         }
     },
@@ -1150,7 +1150,7 @@ def main():
             run_project(args.name, args.debug)
         elif args.proj_command == "install":
             install_dependencies(args.name)
-        elif args.proj_command == 'test':
+        elif args.proj_command == "test":
             test_project(args)
         else:
             print("[proj] Unknown project subcommand.")
