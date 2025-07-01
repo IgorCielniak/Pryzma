@@ -1035,8 +1035,8 @@ def build_parser():
     proj_install = proj_subparsers.add_parser("install", help="Install project dependencies")
     proj_install.add_argument("name", help="Project name")
 
-    test_parser = proj_subparsers.add_parser('test')
-    test_parser.add_argument('proj_name', help='Name of the project to test')
+    proj_test = proj_subparsers.add_parser("test", help="Run tests for a specified project")
+    proj_test.add_argument("proj_name", help="Name of the project to test")
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
