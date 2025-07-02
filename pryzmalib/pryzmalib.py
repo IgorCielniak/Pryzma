@@ -1,7 +1,7 @@
 import json
 import sys
 import os
-
+import ppm
 
 class pryzmalib():
     def __init__(self):
@@ -43,3 +43,45 @@ class pryzmalib():
                 return internal_function(*args, **kwargs)
 
         return PryzmaModule()
+
+    def preproc(self, code):
+        
+        interpreter.preprocess_only = True
+        preprocessed_code = interpreter.interpret(code)
+
+        return preproced_code
+
+    def get_interpreter(self):
+        return interpreter
+
+
+    def debug(self, file_path, args):
+        interpreter.debug_interpreter(file_path, True, args)
+
+    def ppm_install(self, package_name):
+        return ppm.install(package_name)
+
+    def ppm_list(self):
+        return ppm.list_packages()
+
+    def ppm_remove(self, package_name):
+        return ppm.remove(package_name)
+
+    def ppm_info(self, package_name):
+        return ppm.info(package_name)
+
+    def ppm_update(self, package_name):
+        return ppm.update(package_name)
+
+    def ppm_update_all(self):
+        return ppm.update_all()
+
+def init():
+    return pryzmalib()
+
+
+
+
+
+
+
