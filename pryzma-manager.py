@@ -305,6 +305,10 @@ def init_main_env():
         if not os.path.exists(path):
             os.makedirs(path)
             print(f"[init] Created {path}")
+    config = load_config()
+    if not "pryzma_path" in config:
+        set_config_value("pryzma_path", os.path.abspath(os.path.dirname(__file__)))
+        set_config_value("pryzma_path", os.path.abspath(os.path.dirname(__file__)), True)
 
 def create_project_structure(project_path, template_name, project_name):
     """Create project files based on template"""
