@@ -359,8 +359,9 @@ def init_project(name=None, interactive=False, template="basic", use_git=False, 
         for tpl_name, tpl_info in TEMPLATES.items():
             print(f"  {tpl_name}: {tpl_info['description']}")
         template = input("Choose template (default: basic): ").strip() or "basic"
+        use_git = False if input("Use git? (y/n default yes):").strip() != "y" or "yes" else True
         if use_git:
-            create_gitignore = input("Create a .gitignore (default: Yes): ").strip() or True
+            create_gitignore = False if input("Create a .gitignore (y/n default: yes): ").strip() != "y" or "yes" else True
 
     if not name:
         print("[init] Project name is required.")
