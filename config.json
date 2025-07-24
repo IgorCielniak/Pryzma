@@ -1,4 +1,4 @@
 {
-    "interpreter_path": "Pryzma-programming-language",
+    "interpreter_path": "./Pryzma-programming-language",
     "pryzma_path": "."
 }
