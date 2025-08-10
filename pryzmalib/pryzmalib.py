@@ -19,8 +19,8 @@ class pryzmalib():
         
         return os.path.expanduser(data.get('interpreter_path'))
 
-    def run_file(self, path):
-        interpreter.interpret_file(path)
+    def run_file(self, path, *argv):
+        interpreter.interpret_file(path, *argv)
 
     def run(self, code):
         interpreter.interpret(code)
@@ -28,7 +28,7 @@ class pryzmalib():
     def pryzma_import(self, function_name, file_path):
         # This is the function that will be called when the imported module is called
         def internal_function(*args, **kwargs):
-            interpreter.interpret("preproc=nan")
+            interpreter.interpret("#nan")
             interpreter.import_functions(os.path.abspath(file_path))
             args = list(args)
             for i, arg in enumerate(args):

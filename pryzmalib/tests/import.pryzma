@@ -1,6 +1,4 @@
-preproc=nan
-
-use ./module.pryzma
+use ./module.pryzma with #nan
 
 result = @test("gg")
 
