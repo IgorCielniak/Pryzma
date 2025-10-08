@@ -1,12 +1,17 @@
 # Pryzma
 
-<div style="display: flex; align-items: center; gap: 15px;">
-  <img src="assets/logo.png" alt="Pryzma Logo" width="180" />
-  <div style="font-size: 1.22rem; line-height: 1.6;">
-    <strong>Pryzma</strong> is a modern, general-purpose programming language designed to be <strong>powerful</strong>, and <strong>highly extensible</strong>.<br>
-    It combines the <strong>simplicity of C</strong>, the <strong>flexibility of Python</strong>, and <strong>metaprogramming capabilities</strong> as well as features inspired by <strong>systems-level languages</strong>.
-  </div>
-</div>
+<table>
+  <tr>
+    <td width="220">
+      <img src="assets/logo.png" alt="Pryzma Logo" width="280">
+    </td>
+    <td>
+        <strong>Pryzma</strong> is a modern, general-purpose programming language designed to be <strong>powerful</strong>, <strong>consistent</strong>, and <strong>highly extensible</strong>.<br>
+        It combines the <strong>simplicity of C</strong>, the <strong>flexibility of Python</strong>, and <strong>metaprogramming capabilities</strong> inspired by systems-level languages — all while remaining lightweight and fast.
+    </td>
+  </tr>
+</table>
+
 
 ## ✨ Features
 
