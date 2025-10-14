@@ -7,7 +7,7 @@
     </td>
     <td>
         <strong>Pryzma</strong> is a modern, general-purpose programming language designed to be <strong>powerful</strong>, <strong>consistent</strong>, and <strong>highly extensible</strong>.<br>
-        It combines the <strong>simplicity of C</strong>, the <strong>flexibility of Python</strong>, and <strong>metaprogramming capabilities</strong> inspired by systems-level languages — all while remaining lightweight and fast.
+        It combines the <strong>simplicity of C</strong>, the <strong>flexibility of Python</strong>, and <strong>metaprogramming capabilities</strong> inspired by systems-level languages — all while remaining lightweight and easy to understand.
     </td>
   </tr>
 </table>
