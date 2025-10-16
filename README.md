@@ -53,7 +53,7 @@ git clone https://github.com/IgorCielniak/Pryzma.git
 cd Pryzma
 ```
 
-### 3. Run Your First Script
+### 2. Run Your First Script
 
 ```bash
 cd Pryzma-programming-language #cd in to the language core
