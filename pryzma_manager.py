@@ -391,7 +391,12 @@ def init_project(name=None, interactive=False, template="basic", use_git=False, 
             print(f"[git] Failed to initialize Git repo: {e}")
 
 def remove_project(name):
-    project_path = os.path.join(PROJECTS_PATH, name)
+    if name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, name)
+
+    name = os.path.basename(project_path)
 
     if not os.path.exists(project_path):
         print(f"[remove] Project '{name}' does not exist.")
@@ -453,7 +458,13 @@ def list_projects(detailed=False):
             print(f" - {project}")
 
 def show_project_info(name):
-    project_path = os.path.join(PROJECTS_PATH, name)
+    if name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, name)
+
+    name = os.path.basename(project_path)
+
     if not os.path.exists(project_path):
         print(f"[info] Project '{name}' does not exist.")
         return
@@ -510,7 +521,12 @@ def add_project(path):
 
 
 def get_project_entry_point(project_name):
-    project_path = os.path.join(PROJECTS_PATH, project_name)
+    if project_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    project_name = os.path.basename(project_path)
 
     if not os.path.exists(project_path):
         print(f"[run] Project '{project_name}' does not exist.")
@@ -541,7 +557,12 @@ def get_project_entry_point(project_name):
 
 
 def run_project(name, debug=False):
-    project_path = os.path.join(PROJECTS_PATH, name)
+    if name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, name)
+
+    name = os.path.basename(project_path)
 
     config_path = os.path.join(project_path, ".pryzma")
     venv_path = None
@@ -594,7 +615,13 @@ def run_project(name, debug=False):
     return True
 
 def test_project(args):
-    project_path = os.path.join(PRYZMA_PATH, 'projects', args.proj_name)
+    if args.proj_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, args.proj_name)
+
+    name = os.path.basename(project_path)
+
     test_script = os.path.join(PRYZMA_PATH, 'tools', 'test.py')
 
     if not os.path.exists(project_path):
@@ -609,8 +636,13 @@ def test_project(args):
     os.system(f"python {test_script}")
 
 def install_dependencies(project_name):
-    """Install project dependencies from requirements.txt"""
-    project_path = os.path.join(PROJECTS_PATH, project_name)
+    if project_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    project_name = os.path.basename(project_path)
+
     requirements_file = os.path.join(project_path, "requirements.txt")
 
     if not os.path.exists(requirements_file):
@@ -710,7 +742,12 @@ def venv_command(action, name=None, project_name=None):
 
 def venv_link_project(venv_name, project_name):
     venv_path = os.path.join(VENVS_PATH, venv_name)
-    project_path = os.path.join(PROJECTS_PATH, project_name)
+    if project_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    project_name = os.path.basename(project_path)
 
     if not os.path.exists(venv_path):
         print(f"[venv] Virtual environment '{venv_name}' does not exist")
@@ -742,7 +779,12 @@ def venv_link_project(venv_name, project_name):
 
 
 def venv_unlink_project(project_name):
-    project_path = os.path.join(PROJECTS_PATH, project_name)
+    if project_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, project_name)
+
+    project_name = os.path.basename(project_path)
 
     if not os.path.exists(project_path):
         print(f"[venv] Project '{project_name}' does not exist")
