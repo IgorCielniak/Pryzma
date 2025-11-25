@@ -635,6 +635,48 @@ def test_project(args):
     os.chdir(project_path)
     os.system(f"python {test_script}")
 
+def build_project(args):
+    if args.proj_name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, args.proj_name)
+
+    name = os.path.basename(project_path)
+
+    if not os.path.exists(project_path):
+        print(f"Error: Project directory {project_path} does not exist")
+        sys.exit(1)
+
+    with open(os.path.join(project_path, ".pryzma")) as file:
+        content = file.read()
+
+    content = eval(content)
+
+    entry_point = os.path.join(project_path, content["entry_point"])
+
+    with open(os.path.join(os.path.dirname(__file__), "minimal.py")) as file:
+        py_template = file.read()
+
+    with open(entry_point) as file:
+        code = repr(file.read())
+
+    runner = f"""
+if __name__ == "__main__":
+    interpreter = PryzmaInterpreter()
+    interpreter.pre_interpret({code})
+    """
+
+    build = py_template + runner
+
+    out_name = os.path.splitext(entry_point)[0] + "_generated.py"
+    with open(out_name, "w") as out_file:
+        out_file.write(build)
+
+    print(f"Generated Python written to: {out_name}")
+
+    os.system(f"nuitka {out_name}")
+
+
 def install_dependencies(project_name):
     if project_name == ".":
         project_path = os.getcwd()
@@ -1085,6 +1127,9 @@ def build_parser():
     proj_test = proj_subparsers.add_parser("test", help="Run tests for a specified project")
     proj_test.add_argument("proj_name", help="Name of the project to test")
 
+    proj_build = proj_subparsers.add_parser("build", help="Build a specified project")
+    proj_build.add_argument("proj_name", help="Name of the project to build")
+
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
     run_parser.add_argument("path", nargs="?", help="Path to .pryzma script")
@@ -1199,6 +1244,8 @@ def main():
             install_dependencies(args.name)
         elif args.proj_command == "test":
             test_project(args)
+        elif args.proj_command == "build":
+            build_project(args)
         else:
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
