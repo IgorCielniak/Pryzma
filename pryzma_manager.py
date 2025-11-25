@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 import json
 import shutil
@@ -8,6 +9,7 @@ import requests
 import zipfile
 import io
 import importlib
+from collections import OrderedDict
 from pathlib import Path
 
 PRYZMA_PATH = os.path.abspath(os.path.dirname(__file__))
@@ -345,7 +347,7 @@ def create_project_structure(project_path, template_name, project_name):
         "description": TEMPLATES[template_name]["description"],
     }
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
     print(f"[init] Created .pryzma config at {config_path}")
@@ -441,7 +443,7 @@ def list_projects(detailed=False):
         for project in projects:
             project_path = os.path.join(PROJECTS_PATH, project)
             if detailed:
-                config_path = os.path.join(project_path, ".pryzma")
+                config_path = os.path.join(project_path, "pryzma.json")
                 if os.path.exists(config_path):
                     try:
                         with open(config_path) as f:
@@ -469,7 +471,7 @@ def show_project_info(name):
         print(f"[info] Project '{name}' does not exist.")
         return
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     if os.path.exists(config_path):
         try:
             with open(config_path) as f:
@@ -535,7 +537,7 @@ def get_project_entry_point(project_name):
     if os.path.islink(project_path):
         project_path = os.path.realpath(project_path)
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     if not os.path.exists(config_path):
         print(f"[run] No .pryzma config found in project '{project_name}'")
         return None
@@ -564,7 +566,7 @@ def run_project(name, debug=False):
 
     name = os.path.basename(project_path)
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     venv_path = None
     if os.path.exists(config_path):
         try:
@@ -647,28 +649,68 @@ def build_project(args):
         print(f"Error: Project directory {project_path} does not exist")
         sys.exit(1)
 
-    with open(os.path.join(project_path, ".pryzma")) as file:
-        content = file.read()
+    project_config = os.path.join(project_path, "pryzma.json")
+    if not os.path.exists(project_config):
+        print(f"[build] Missing pryzma.json in {project_path}")
+        sys.exit(1)
 
-    content = eval(content)
+    with open(project_config) as file:
+        content = json.load(file)
 
     entry_point = os.path.join(project_path, content["entry_point"])
+    if not os.path.exists(entry_point):
+        print(f"[build] Entry point '{entry_point}' does not exist")
+        sys.exit(1)
+
+    resolution = resolve_pryzma_dependencies(entry_point, project_path)
+
+    build_dir = os.path.join(project_path, "build")
+    os.makedirs(build_dir, exist_ok=True)
+
+    manifest_path = os.path.join(build_dir, "dependency_manifest.json")
+    manifest_payload = {
+        "entry_point": entry_point,
+        "ordered_files": resolution["ordered"],
+        "missing": resolution["missing"],
+        "cycles": resolution["cycles"],
+    }
+
+    if resolution["missing"]:
+        print("[build] Warning: unresolved dependencies detected:")
+        for issue in resolution["missing"]:
+            rel = os.path.relpath(issue["source"], project_path)
+            print(f"  - {issue['target']} referenced in {rel}:{issue['line']} ({issue['type']})")
+
+    if resolution["cycles"]:
+        print("[build] Warning: dependency cycles detected:")
+        for cycle in resolution["cycles"]:
+            printable = " -> ".join([os.path.relpath(node, project_path) for node in cycle])
+            print(f"  - {printable}")
+
+    bundler = PryzmaSourceBundler(project_path)
+    bundled_source = bundler.bundle(entry_point)
+
+    manifest_payload["bundled_modules"] = bundler.module_metadata
+    with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest_payload, manifest_file, indent=4)
 
     with open(os.path.join(os.path.dirname(__file__), "minimal.py")) as file:
         py_template = file.read()
 
-    with open(entry_point) as file:
-        code = repr(file.read())
-
     runner = f"""
+EMBEDDED_SOURCE = {bundled_source!r}
+
+
 if __name__ == "__main__":
     interpreter = PryzmaInterpreter()
-    interpreter.pre_interpret({code})
+    interpreter.file_path = "<embedded>"
+    interpreter.variables["__file__"] = "<embedded>"
+    interpreter.pre_interpret(EMBEDDED_SOURCE)
     """
 
     build = py_template + runner
 
-    out_name = os.path.splitext(entry_point)[0] + "_generated.py"
+    out_name = os.path.join(build_dir, f"{name}_generated.py")
     with open(out_name, "w") as out_file:
         out_file.write(build)
 
@@ -713,6 +755,341 @@ def install_dependencies(project_name):
         return False
 
 
+def _strip_inline_comment(line):
+    if "//" in line:
+        return line.split("//", 1)[0]
+    return line
+
+
+def _sanitize_reference_fragment(fragment):
+    if not fragment:
+        return ""
+
+    fragment = _strip_inline_comment(fragment).strip()
+
+    stop_markers = [
+        " with ",
+        " as ",
+        " import ",
+        " => ",
+        " = ",
+        " {",
+        " (",
+        " [",
+    ]
+
+    for marker in stop_markers:
+        idx = fragment.find(marker)
+        if idx != -1:
+            fragment = fragment[:idx]
+            break
+
+    if " " in fragment:
+        fragment = fragment.split()[0]
+
+    return fragment.strip().strip(';,"\'')
+
+
+FUNCTION_DEF_PATTERN = re.compile(r'^/([^\s{]+)', re.MULTILINE)
+
+
+def parse_pryzma_directives(file_path):
+    directives = []
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as source:
+            for idx, raw_line in enumerate(source, start=1):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+
+                normalized = _strip_inline_comment(raw_line).strip()
+                if not normalized:
+                    continue
+
+                if normalized.startswith("#insert"):
+                    fragment = _sanitize_reference_fragment(normalized[len("#insert"):])
+                    if fragment:
+                        directives.append({"type": "insert", "target": fragment, "line": idx})
+                elif normalized.startswith("use "):
+                    fragment = _sanitize_reference_fragment(normalized[4:])
+                    if fragment:
+                        directives.append({"type": "use", "target": fragment, "line": idx})
+    except FileNotFoundError:
+        pass
+
+    return directives
+
+
+def parse_use_statement(line):
+    normalized = _strip_inline_comment(line).strip().rstrip(";")
+    if not normalized.lower().startswith("use "):
+        return None
+
+    remainder = normalized[4:].strip()
+    tokens = remainder.split()
+
+    target_tokens = []
+    directives_tokens = []
+    alias = None
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        lower = token.lower()
+        if lower == "with":
+            i += 1
+            buffer = []
+            while i < len(tokens) and tokens[i].lower() != "as":
+                buffer.append(tokens[i])
+                i += 1
+            directives_tokens.extend(buffer)
+            continue
+        if lower == "as":
+            i += 1
+            if i < len(tokens):
+                alias = tokens[i].strip('.,"\'')
+                i += 1
+            continue
+        target_tokens.append(token)
+        i += 1
+
+    target = " ".join(target_tokens).strip().strip('"\'')
+    directives = {token.strip(',').lower() for token in directives_tokens if token.strip(',')}
+
+    return {
+        "target": target,
+        "alias": alias,
+        "directives": directives,
+    }
+
+
+def _prefix_module_functions(source, alias):
+    if not alias:
+        return source
+
+    def _replace(match):
+        name = match.group(1).strip()
+        if name.startswith(f"{alias}."):
+            return f"/{name}"
+        return f"/{alias}.{name}"
+
+    return FUNCTION_DEF_PATTERN.sub(_replace, source)
+
+
+class PryzmaSourceBundler:
+    def __init__(self, project_root):
+        self.project_root = os.path.realpath(project_root)
+        self._module_sources = OrderedDict()
+        self._processing = set()
+        self._module_metadata = []
+
+    def bundle(self, entry_path):
+        entry_body = self._process_file(entry_path)
+        combined_parts = []
+
+        for idx, ((module_path, alias_key, _), module_source) in enumerate(self._module_sources.items(), start=1):
+            header = f"// [bundle] module {idx}: {alias_key or os.path.basename(module_path)}\n"
+            combined_parts.append(header)
+            combined_parts.append(module_source.rstrip() + "\n")
+
+        combined_parts.append(entry_body)
+        return "\n".join(part for part in combined_parts if part)
+
+    def _process_file(self, file_path):
+        real_path = os.path.realpath(file_path)
+        if real_path in self._processing:
+            print(f"[bundle] Cycle detected for {real_path}, skipping nested include")
+            return ""
+
+        try:
+            with open(real_path, "r", encoding="utf-8") as source:
+                lines = source.readlines()
+        except FileNotFoundError:
+            print(f"[bundle] Missing file during bundling: {file_path}")
+            return ""
+
+        self._processing.add(real_path)
+        output = []
+        base_dir = os.path.dirname(real_path)
+
+        for raw_line in lines:
+            stripped = _strip_inline_comment(raw_line).strip()
+            if stripped.startswith("use "):
+                parsed = parse_use_statement(raw_line)
+                if not parsed or not parsed["target"]:
+                    continue
+
+                resolved = resolve_pryzma_reference(parsed["target"], base_dir, self.project_root)
+                if not resolved:
+                    print(f"[bundle] Unable to resolve module '{parsed['target']}' referenced in {real_path}")
+                    continue
+
+                nan_flag = ("#nan" in parsed["directives"]) or ("nan" in parsed["directives"])
+                alias = parsed["alias"]
+                if not nan_flag:
+                    alias = alias or os.path.splitext(os.path.basename(resolved))[0]
+                else:
+                    alias = parsed["alias"]
+
+                self._include_module(resolved, alias, nan_flag)
+                continue
+
+            if stripped.startswith("#insert"):
+                reference = _sanitize_reference_fragment(stripped[len("#insert"):])
+                resolved = resolve_pryzma_reference(reference, base_dir, self.project_root)
+                if not resolved:
+                    print(f"[bundle] Unable to resolve insert '{reference}' in {real_path}")
+                    continue
+                output.append(self._process_file(resolved))
+                continue
+
+            output.append(raw_line)
+
+        self._processing.remove(real_path)
+        return "".join(output)
+
+    def _include_module(self, module_path, alias, nan_flag):
+        real_module_path = os.path.realpath(module_path)
+        key = (real_module_path, alias or "", nan_flag)
+        if key in self._module_sources:
+            return
+
+        module_body = self._process_file(real_module_path)
+        if not nan_flag:
+            effective_alias = alias or os.path.splitext(os.path.basename(real_module_path))[0]
+            module_body = _prefix_module_functions(module_body, effective_alias)
+
+        self._module_sources[key] = module_body
+        self._module_metadata.append({
+            "path": real_module_path,
+            "alias": alias,
+            "nan": nan_flag,
+        })
+
+    @property
+    def module_metadata(self):
+        return list(self._module_metadata)
+
+
+def _resolve_package_reference(reference):
+    if not reference:
+        return None
+
+    normalized = reference.strip().strip('"\'')
+    normalized = normalized.lstrip("@")
+
+    if not normalized:
+        return None
+
+    if normalized.startswith(".") or "/" in normalized or "\\" in normalized:
+        return None
+
+    package_relative = None
+    if "::" in normalized:
+        parts = [part.strip() for part in normalized.split("::") if part.strip()]
+        if not parts:
+            return None
+        file_name = parts[-1]
+        folder = os.path.join(*parts[:-1]) if len(parts) > 1 else ""
+        package_relative = os.path.join(folder, f"{file_name}.pryzma") if folder else f"{file_name}.pryzma"
+    else:
+        package_relative = os.path.join(normalized, f"{normalized}.pryzma")
+
+    candidate = os.path.join(PACKAGES_DIR, package_relative)
+    if os.path.isfile(candidate):
+        return candidate
+
+    if candidate.endswith(".pryzma"):
+        alt_candidate = candidate[:-7] + ".prz"
+        if os.path.isfile(alt_candidate):
+            return alt_candidate
+
+    return None
+
+
+def resolve_pryzma_reference(reference, current_dir, project_root):
+    if not reference:
+        return None
+
+    normalized = reference.replace("\\", "/").strip().strip('"\'')
+    candidates = [normalized]
+    if not normalized.endswith(".pryzma"):
+        candidates.append(f"{normalized}.pryzma")
+
+    project_root = os.path.realpath(project_root)
+    current_dir = os.path.realpath(current_dir) if current_dir else None
+
+    search_roots = []
+    if os.path.isabs(normalized):
+        search_roots.append("")
+    else:
+        if current_dir:
+            search_roots.append(current_dir)
+        search_roots.append(project_root)
+        src_root = os.path.join(project_root, "src")
+        if os.path.isdir(src_root):
+            search_roots.append(src_root)
+
+    for root in search_roots:
+        for candidate in candidates:
+            candidate_path = os.path.normpath(os.path.join(root, candidate)) if root else os.path.normpath(candidate)
+            if os.path.isfile(candidate_path):
+                return candidate_path
+
+    package_candidate = _resolve_package_reference(reference)
+    if package_candidate and os.path.isfile(package_candidate):
+        return package_candidate
+
+    return None
+
+
+def resolve_pryzma_dependencies(entry_path, project_root):
+    visited = set()
+    ordered = []
+    graph = {}
+    missing = []
+    cycles = []
+
+    def visit(path, trail):
+        real_path = os.path.realpath(path)
+
+        if real_path in trail:
+            cycle_start = trail.index(real_path)
+            cycles.append(trail[cycle_start:] + [real_path])
+            return
+
+        if real_path in visited:
+            return
+
+        visited.add(real_path)
+        ordered.append(real_path)
+        graph[real_path] = []
+
+        directives = parse_pryzma_directives(real_path)
+        base_dir = os.path.dirname(real_path)
+
+        for directive in directives:
+            resolved = resolve_pryzma_reference(directive["target"], base_dir, project_root)
+            if not resolved:
+                missing.append({
+                    "source": real_path,
+                    "target": directive["target"],
+                    "line": directive["line"],
+                    "type": directive["type"],
+                })
+                continue
+
+            graph[real_path].append(resolved)
+            visit(resolved, trail + [real_path])
+
+    visit(entry_path, [])
+
+    return {
+        "ordered": ordered,
+        "graph": graph,
+        "missing": missing,
+        "cycles": cycles,
+    }
 def venv_command(action, name=None, project_name=None):
     if action == "create":
         if not name:
@@ -799,7 +1176,7 @@ def venv_link_project(venv_name, project_name):
         print(f"[venv] Project '{project_name}' does not exist")
         return False
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     config = {}
     if os.path.exists(config_path):
         try:
@@ -832,7 +1209,7 @@ def venv_unlink_project(project_name):
         print(f"[venv] Project '{project_name}' does not exist")
         return False
 
-    config_path = os.path.join(project_path, ".pryzma")
+    config_path = os.path.join(project_path, "pryzma.json")
     config = {}
     if os.path.exists(config_path):
         try:
@@ -913,7 +1290,7 @@ def ppm_install(package_name):
         return
 
     # === PRIMARY SOURCE ===
-    primary_url = f"http://igorcielniak.pythonanywhere.com/api/download/{package_name}"
+    primary_url = f"http://pryzma.dzordz.pl/api/download/{package_name}"
     print(f"Trying to download {package_name} from primary source...")
 
     try:
@@ -1067,6 +1444,28 @@ def notes_remove(proj_name, line):
     except ValueError:
         print(f"[notes] Line number must be an integer, got '{line}'")
 
+def ppm_fetch_and_print_packages(url = "http://pryzma.dzordz.pl/api/fetch"):
+    import_err = False
+    try:
+        import requests
+    except ImportError:
+        import_err = True
+        print("module requests not found")
+    if not import_err:
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                package_list = response.json()
+                if package_list:
+                    print("Available packages:")
+                    for package in package_list:
+                        print("-", package)
+                else:
+                    print("No packages available on the server.")
+            else:
+                print("Failed to fetch packages from the server. Status code:", response.status_code)
+        except requests.exceptions.RequestException as e:
+            print("Error fetching packages:", e)
 
 def notes_add(proj_name, note):
     proj_path = os.path.join(PROJECTS_PATH, proj_name)
@@ -1167,7 +1566,7 @@ def build_parser():
 
     #ppm parser
     ppm = subparsers.add_parser("ppm", help="Pryzma package manager")
-    ppm.add_argument("action", choices=["install", "list", "remove", "info", "update"])
+    ppm.add_argument("action", choices=["install", "list", "remove", "info", "update", "fetch"])
     ppm.add_argument("package", nargs="?")
 
     # Config command
@@ -1281,6 +1680,8 @@ def main():
                 ppm_update_package(args.package)
             else:
                 ppm_update_all()
+        elif args.action == "fetch":
+            ppm_fetch_and_print_packages()
         else:
             print("Invalid command or missing package name.")
     elif args.command == "config":

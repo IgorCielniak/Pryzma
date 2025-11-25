@@ -19,7 +19,7 @@ def install(package_name):
         return
 
     # === PRIMARY SOURCE ===
-    primary_url = f"http://igorcielniak.pythonanywhere.com/api/download/{package_name}"
+    primary_url = f"http://pryzma.dzord.pl/api/download/{package_name}"
     print(f"Trying to download {package_name} from primary source...")
 
     try:
@@ -102,3 +102,24 @@ def update_all():
     for pkg in Path(PACKAGES_DIR).iterdir():
         if pkg.is_dir():
             update(pkg.name)
+
+def fetch_and_print_packages(url = "http://pryzma.dzordz.pl/api/fetch"):
+    import_err = False
+    try:
+        import requests
+    except ImportError:
+        import_err = True
+        return "module requests not found"
+    if not import_err:
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                package_list = response.json()
+                if package_list:
+                    return package_list
+                else:
+                    return "No packages available on the server."
+            else:
+                return "Failed to fetch packages from the server. Status code:" + str(response.status_code)
+        except requests.exceptions.RequestException as e:
+            return "Error fetching packages: " + str(e)
