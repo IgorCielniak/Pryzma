@@ -6,6 +6,8 @@ import json
 import shutil
 import subprocess
 import requests
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import zipfile
 import io
 import importlib
@@ -235,6 +237,16 @@ def load_config():
     return {}
 
 
+def resolve_project(name):
+    if name == ".":
+        project_path = os.getcwd()
+    else:
+        project_path = os.path.join(PROJECTS_PATH, name)
+
+    display_name = os.path.basename(project_path)
+    return project_path, display_name
+
+
 def set_config_value(key, value, use_global=False):
     """Set a configuration value in either local or global config"""
     config_path = CONFIG_PATHS[1] if use_global else CONFIG_PATHS[0]
@@ -393,12 +405,7 @@ def init_project(name=None, interactive=False, template="basic", use_git=False, 
             print(f"[git] Failed to initialize Git repo: {e}")
 
 def remove_project(name):
-    if name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, name)
-
-    name = os.path.basename(project_path)
+    project_path, name = resolve_project(name)
 
     if not os.path.exists(project_path):
         print(f"[remove] Project '{name}' does not exist.")
@@ -460,12 +467,7 @@ def list_projects(detailed=False):
             print(f" - {project}")
 
 def show_project_info(name):
-    if name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, name)
-
-    name = os.path.basename(project_path)
+    project_path, name = resolve_project(name)
 
     if not os.path.exists(project_path):
         print(f"[info] Project '{name}' does not exist.")
@@ -523,12 +525,7 @@ def add_project(path):
 
 
 def get_project_entry_point(project_name):
-    if project_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, project_name)
-
-    project_name = os.path.basename(project_path)
+    project_path, project_name = resolve_project(project_name)
 
     if not os.path.exists(project_path):
         print(f"[run] Project '{project_name}' does not exist.")
@@ -559,12 +556,7 @@ def get_project_entry_point(project_name):
 
 
 def run_project(name, debug=False):
-    if name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, name)
-
-    name = os.path.basename(project_path)
+    project_path, name = resolve_project(name)
 
     config_path = os.path.join(project_path, "pryzma.json")
     venv_path = None
@@ -617,12 +609,7 @@ def run_project(name, debug=False):
     return True
 
 def test_project(args):
-    if args.proj_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, args.proj_name)
-
-    name = os.path.basename(project_path)
+    project_path, name = resolve_project(args.proj_name)
 
     test_script = os.path.join(PRYZMA_PATH, 'tools', 'test.py')
 
@@ -638,12 +625,7 @@ def test_project(args):
     os.system(f"python {test_script}")
 
 def build_project(args):
-    if args.proj_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, args.proj_name)
-
-    name = os.path.basename(project_path)
+    project_path, name = resolve_project(args.proj_name)
 
     if not os.path.exists(project_path):
         print(f"Error: Project directory {project_path} does not exist")
@@ -840,12 +822,7 @@ if __name__ == "__main__":
 
 
 def install_dependencies(project_name):
-    if project_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, project_name)
-
-    project_name = os.path.basename(project_path)
+    project_path, project_name = resolve_project(project_name)
 
     requirements_file = os.path.join(project_path, "requirements.txt")
 
@@ -1281,12 +1258,7 @@ def venv_command(action, name=None, project_name=None):
 
 def venv_link_project(venv_name, project_name):
     venv_path = os.path.join(VENVS_PATH, venv_name)
-    if project_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, project_name)
-
-    project_name = os.path.basename(project_path)
+    project_path, project_name = resolve_project(project_name)
 
     if not os.path.exists(venv_path):
         print(f"[venv] Virtual environment '{venv_name}' does not exist")
@@ -1318,12 +1290,7 @@ def venv_link_project(venv_name, project_name):
 
 
 def venv_unlink_project(project_name):
-    if project_name == ".":
-        project_path = os.getcwd()
-    else:
-        project_path = os.path.join(PROJECTS_PATH, project_name)
-
-    project_name = os.path.basename(project_path)
+    project_path, project_name = resolve_project(project_name)
 
     if not os.path.exists(project_path):
         print(f"[venv] Project '{project_name}' does not exist")
@@ -1421,22 +1388,47 @@ def ppm_install(package_name):
             mirrors = ["http://pryzma.dzordz.pl/api"]
         return mirrors
 
-    def choose_mirrors_by_latency(mirrors, package_name, timeout=3):
-        timings = []
+    def choose_mirrors_by_latency(mirrors, package_name, timeout=3, max_workers=8):
+        """Probe mirrors in parallel and return mirrors that responded 200, ordered by latency.
+
+        If none responded successfully, an empty list is returned and caller should
+        fall back to trying mirrors in configured order.
+        """
+        if not mirrors:
+            return []
+
+        targets = []
         for m in mirrors:
             base = m.rstrip('/')
             url = f"{base}/download/{package_name}"
-            try:
-                import time
-                t0 = time.time()
-                r = requests.head(url, timeout=timeout, allow_redirects=True)
-                if r.status_code == 200:
-                    timings.append((time.time() - t0, m))
-            except Exception:
-                continue
+            targets.append((m, url))
 
-        timings.sort(key=lambda x: x[0])
-        return [m for _, m in timings]
+        results = []
+        workers = min(max_workers, len(targets))
+
+        def _probe(url, mirror):
+            s = requests.Session()
+            t0 = time.time()
+            try:
+                r = s.head(url, timeout=timeout, allow_redirects=True)
+                elapsed = time.time() - t0
+                return (mirror, True, elapsed, r.status_code)
+            except Exception as e:
+                return (mirror, False, None, str(e))
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            future_to_mirror = {ex.submit(_probe, url, mirror): mirror for mirror, url in targets}
+            for fut in as_completed(future_to_mirror):
+                try:
+                    mirror, ok, elapsed, status = fut.result()
+                    if ok and status == 200:
+                        results.append((elapsed, mirror))
+                except Exception:
+                    # ignore individual probe errors
+                    continue
+
+        results.sort(key=lambda x: x[0])
+        return [m for _, m in results]
 
     mirrors = get_ppm_mirrors()
     print(f"[ppm] Using {len(mirrors)} mirror(s)")
