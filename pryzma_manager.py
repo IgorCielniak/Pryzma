@@ -8,6 +8,7 @@ import subprocess
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import zipfile
 import io
 import importlib
@@ -53,6 +54,93 @@ TEMPLATES = {
         }
     },
 }
+
+# Build cache directory for incremental/reproducible builds
+BUILD_CACHE_DIR = os.path.join(PRYZMA_PATH, ".build_cache")
+MAX_BUILD_CACHE_ENTRIES = 50
+
+
+def compute_manifest_hash(ordered_files):
+    """Compute a stable hash for an ordered list of file paths.
+
+    Hash is computed from file contents in order. Missing files are skipped but
+    their path is still incorporated to avoid collisions.
+    """
+    h = hashlib.sha256()
+    for path in ordered_files:
+        h.update(path.encode('utf-8'))
+        try:
+            with open(path, 'rb') as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except Exception:
+            # If file can't be read, include a marker so hash differs
+            h.update(b'__missing__')
+    return h.hexdigest()
+
+
+def prune_build_cache(max_entries=MAX_BUILD_CACHE_ENTRIES):
+    """Prune the build cache directory to keep at most `max_entries` subdirs.
+
+    Oldest directories (by mtime) are removed first.
+    """
+    try:
+        if not os.path.isdir(BUILD_CACHE_DIR):
+            return
+
+        subdirs = [os.path.join(BUILD_CACHE_DIR, d) for d in os.listdir(BUILD_CACHE_DIR) if os.path.isdir(os.path.join(BUILD_CACHE_DIR, d))]
+        if len(subdirs) <= max_entries:
+            return
+
+        subdirs.sort(key=lambda p: os.path.getmtime(p))
+        to_remove = subdirs[:len(subdirs) - max_entries]
+        for p in to_remove:
+            try:
+                shutil.rmtree(p)
+                print(f"[cache] Pruned old cache entry: {p}")
+            except Exception as e:
+                print(f"[cache] Warning: failed to remove cache dir {p}: {e}")
+    except Exception as e:
+        print(f"[cache] Warning: prune failed: {e}")
+
+
+def clear_build_cache():
+    """Remove entire build cache directory."""
+    try:
+        if os.path.isdir(BUILD_CACHE_DIR):
+            shutil.rmtree(BUILD_CACHE_DIR)
+            print(f"[cache] Cleared build cache at {BUILD_CACHE_DIR}")
+        else:
+            print("[cache] Build cache is already empty")
+    except Exception as e:
+        print(f"[cache] Failed to clear build cache: {e}")
+
+
+def _copy_tree(src, dst):
+    """Recursively copy files from src to dst. Creates dst if necessary."""
+    if not os.path.exists(src):
+        return
+    os.makedirs(dst, exist_ok=True)
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        target_root = os.path.join(dst, rel) if rel != '.' else dst
+        os.makedirs(target_root, exist_ok=True)
+        for d in dirs:
+            os.makedirs(os.path.join(target_root, d), exist_ok=True)
+        for f in files:
+            src_f = os.path.join(root, f)
+            dst_f = os.path.join(target_root, f)
+            try:
+                shutil.copy2(src_f, dst_f)
+            except Exception:
+                # best-effort copy
+                try:
+                    shutil.copy(src_f, dst_f)
+                except Exception:
+                    pass
 
 
 GITIGNORE_TEMPLATE = """
@@ -684,6 +772,29 @@ def build_project(args):
         "cycles": resolution["cycles"],
     }
 
+    # Incremental build cache: compute manifest hash and try to reuse generated python
+    manifest_hash = compute_manifest_hash(resolution.get("ordered", []))
+    os.makedirs(BUILD_CACHE_DIR, exist_ok=True)
+    cache_dir = os.path.join(BUILD_CACHE_DIR, manifest_hash)
+    cached_py = os.path.join(cache_dir, f"{name}_generated.py")
+    out_name = os.path.join(build_dir, f"{name}_generated.py")
+    if (not getattr(args, 'no_cache', False)) and os.path.exists(cached_py):
+        # Reuse cached generated python to skip bundling step
+        try:
+            shutil.copy(cached_py, out_name)
+            print(f"[build] Cache hit: reused generated Python from {cache_dir}")
+            # If cached compiled artifacts exist, restore them and skip compilation
+            cached_artifacts = os.path.join(cache_dir, "artifacts")
+            if os.path.isdir(cached_artifacts):
+                _copy_tree(cached_artifacts, build_dir)
+                print(f"[build] Restored compiled artifacts from cache")
+                return
+            # Otherwise run compilation
+            os.system(f"nuitka {out_name}")
+            return
+        except Exception as e:
+            print(f"[build] Failed to reuse cache: {e}")
+
     if resolution["missing"]:
         print("[build] Warning: unresolved dependencies detected:")
         for issue in resolution["missing"]:
@@ -719,16 +830,32 @@ if __name__ == "__main__":
 
     build = py_template + runner
 
-    out_name = os.path.join(build_dir, f"{name}_generated.py")
     with open(out_name, "w") as out_file:
         out_file.write(build)
 
     print(f"Generated Python written to: {out_name}")
 
+    # Cache the generated python for future incremental builds
+    try:
+        if not getattr(args, 'no_cache', False):
+            os.makedirs(cache_dir, exist_ok=True)
+            shutil.copy(out_name, cached_py)
+            # also cache compiled artifacts if present in build_dir
+            artifacts_dir = os.path.join(cache_dir, "artifacts")
+            try:
+                _copy_tree(build_dir, artifacts_dir)
+            except Exception:
+                pass
+            print(f"[build] Cached generated Python and artifacts to {cache_dir}")
+            # prune cache to keep it bounded
+            prune_build_cache()
+    except Exception as e:
+        print(f"[build] Warning: failed to write cache: {e}")
+
     os.system(f"nuitka {out_name}")
 
 
-def build_file(file_path, auto_fetch=False):
+def build_file(file_path, auto_fetch=False, no_cache=False):
     entry_point = os.path.abspath(file_path)
 
     if not os.path.exists(entry_point):
@@ -776,6 +903,29 @@ def build_file(file_path, auto_fetch=False):
         "cycles": resolution["cycles"],
     }
 
+    # Incremental build cache for single-file builds
+    manifest_hash = compute_manifest_hash(resolution.get("ordered", []))
+    os.makedirs(BUILD_CACHE_DIR, exist_ok=True)
+    cache_dir = os.path.join(BUILD_CACHE_DIR, manifest_hash)
+    base_name = os.path.splitext(os.path.basename(entry_point))[0]
+    cached_py = os.path.join(cache_dir, f"{base_name}_generated.py")
+    out_name = os.path.join(build_dir, f"{base_name}_generated.py")
+    if (not no_cache) and os.path.exists(cached_py):
+        try:
+            shutil.copy(cached_py, out_name)
+            print(f"[build] Cache hit: reused generated Python from {cache_dir}")
+            # If cached compiled artifacts exist, restore them and skip compilation
+            cached_artifacts = os.path.join(cache_dir, "artifacts")
+            if os.path.isdir(cached_artifacts):
+                _copy_tree(cached_artifacts, build_dir)
+                print(f"[build] Restored compiled artifacts from cache")
+                return
+            # Otherwise run compilation
+            os.system(f"nuitka {out_name}")
+            return
+        except Exception as e:
+            print(f"[build] Failed to reuse cache: {e}")
+
     if resolution["missing"]:
         print("[build] Warning: unresolved dependencies detected:")
         for issue in resolution["missing"]:
@@ -811,14 +961,27 @@ if __name__ == "__main__":
 
     build = py_template + runner
 
-    base_name = os.path.splitext(os.path.basename(entry_point))[0]
-    out_name = os.path.join(build_dir, f"{base_name}_generated.py")
     with open(out_name, "w") as out_file:
         out_file.write(build)
 
     print(f"Generated Python written to: {out_name}")
-
+    # Compile the generated python. After successful compilation, cache generated
+    # python and any produced artifacts (best-effort).
     os.system(f"nuitka {out_name}")
+
+    try:
+        if not no_cache:
+            os.makedirs(cache_dir, exist_ok=True)
+            shutil.copy(out_name, cached_py)
+            artifacts_dir = os.path.join(cache_dir, "artifacts")
+            try:
+                _copy_tree(build_dir, artifacts_dir)
+            except Exception:
+                pass
+            print(f"[build] Cached generated Python and artifacts to {cache_dir}")
+            prune_build_cache()
+    except Exception as e:
+        print(f"[build] Warning: failed to write cache: {e}")
 
 
 def install_dependencies(project_name):
@@ -1884,12 +2047,14 @@ def build_parser():
     proj_build = proj_subparsers.add_parser("build", help="Build a specified project")
     proj_build.add_argument("proj_name", help="Name of the project to build")
     proj_build.add_argument("-a", "--auto-fetch", action="store_true", dest="auto_fetch", help="Automatically fetch missing Pryzma package dependencies via ppm when building")
+    proj_build.add_argument("--no-cache", action="store_true", dest="no_cache", help="Do not use the build cache for this build")
 
     # Top-level build command (can build a project or a single file)
     build_cmd = subparsers.add_parser("build", help="Build a Pryzma project or file")
     build_cmd.add_argument("proj_name", nargs="?", help="Name of the project to build")
     build_cmd.add_argument("-f", "--file", dest="file", help="Build a single .pryzma file instead of a project")
     build_cmd.add_argument("-a", "--auto-fetch", action="store_true", dest="auto_fetch", help="Automatically fetch missing Pryzma package dependencies via ppm when building")
+    build_cmd.add_argument("--no-cache", action="store_true", dest="no_cache", help="Do not use the build cache for this build")
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
@@ -1966,6 +2131,13 @@ def build_parser():
     plugin_parser = subparsers.add_parser("plugin", help="Manage plugins")
     plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command")
 
+    # Cache management
+    cache_parser = subparsers.add_parser("cache", help="Manage build cache")
+    cache_sub = cache_parser.add_subparsers(dest="cache_action")
+    cache_clean = cache_sub.add_parser("clean", help="Clear entire build cache")
+    cache_prune = cache_sub.add_parser("prune", help="Prune build cache to keep at most N entries")
+    cache_prune.add_argument("--max", type=int, default=MAX_BUILD_CACHE_ENTRIES, help="Maximum cache subdirectories to keep")
+
     list_parser = plugin_subparsers.add_parser("list", help="List plugins")
     list_parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed plugin info")
 
@@ -2031,7 +2203,7 @@ def main():
         run_script(args.path, args.debug)
     elif args.command == "build":
         if getattr(args, 'file', None):
-            build_file(args.file, getattr(args, 'auto_fetch', False))
+            build_file(args.file, getattr(args, 'auto_fetch', False), getattr(args, 'no_cache', False))
         elif getattr(args, 'proj_name', None):
             build_project(args)
         else:
@@ -2128,6 +2300,13 @@ def main():
             ppm_mirrors_test()
         else:
             print("[mirrors] Unknown mirrors subcommand.")
+    elif args.command == "cache":
+        if args.cache_action == "clean":
+            clear_build_cache()
+        elif args.cache_action == "prune":
+            prune_build_cache(getattr(args, 'max', MAX_BUILD_CACHE_ENTRIES))
+        else:
+            print("[cache] Unknown cache subcommand.")
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
