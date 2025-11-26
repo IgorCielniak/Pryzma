@@ -664,6 +664,33 @@ def build_project(args):
 
     resolution = resolve_pryzma_dependencies(entry_point, project_path)
 
+    # If auto-fetch requested, try to fetch missing Pryzma package dependencies via ppm
+    auto_fetch = getattr(args, 'auto_fetch', False)
+    if auto_fetch and resolution.get("missing"):
+        def infer_package_name_from_reference(ref):
+            if not ref:
+                return None
+            normalized = ref.replace('\\', '/').strip().strip('"\'')
+            normalized = normalized.lstrip('@')
+            if '::' in normalized:
+                return normalized.split('::', 1)[0]
+            if '/' in normalized or normalized.startswith('.') or normalized.startswith('/'):
+                return None
+            return normalized
+
+        missing_before = list(resolution.get("missing", []))
+        for issue in missing_before:
+            pkg = infer_package_name_from_reference(issue.get("target"))
+            if pkg:
+                print(f"[build] Auto-fetching package '{pkg}' for missing reference '{issue.get('target')}'")
+                try:
+                    ppm_install(pkg)
+                except Exception as e:
+                    print(f"[build] Failed to auto-fetch package '{pkg}': {e}")
+
+        # re-resolve after attempting installs
+        resolution = resolve_pryzma_dependencies(entry_point, project_path)
+
     build_dir = os.path.join(project_path, "build")
     os.makedirs(build_dir, exist_ok=True)
 
@@ -711,6 +738,99 @@ if __name__ == "__main__":
     build = py_template + runner
 
     out_name = os.path.join(build_dir, f"{name}_generated.py")
+    with open(out_name, "w") as out_file:
+        out_file.write(build)
+
+    print(f"Generated Python written to: {out_name}")
+
+    os.system(f"nuitka {out_name}")
+
+
+def build_file(file_path, auto_fetch=False):
+    entry_point = os.path.abspath(file_path)
+
+    if not os.path.exists(entry_point):
+        print(f"[build] File '{entry_point}' does not exist")
+        sys.exit(1)
+
+    project_path = os.path.dirname(entry_point) or os.getcwd()
+
+    resolution = resolve_pryzma_dependencies(entry_point, project_path)
+
+    # Optionally attempt to auto-fetch missing Pryzma package dependencies via ppm
+    if auto_fetch and resolution.get("missing"):
+        def infer_package_name_from_reference(ref):
+            if not ref:
+                return None
+            normalized = ref.replace('\\', '/').strip().strip('"\'')
+            normalized = normalized.lstrip('@')
+            if '::' in normalized:
+                return normalized.split('::', 1)[0]
+            if '/' in normalized or normalized.startswith('.') or normalized.startswith('/'):
+                return None
+            return normalized
+
+        missing_before = list(resolution.get("missing", []))
+        for issue in missing_before:
+            pkg = infer_package_name_from_reference(issue.get("target"))
+            if pkg:
+                print(f"[build] Auto-fetching package '{pkg}' for missing reference '{issue.get('target')}'")
+                try:
+                    ppm_install(pkg)
+                except Exception as e:
+                    print(f"[build] Failed to auto-fetch package '{pkg}': {e}")
+
+        # re-resolve after attempting installs
+        resolution = resolve_pryzma_dependencies(entry_point, project_path)
+
+    build_dir = os.path.join(project_path, "build")
+    os.makedirs(build_dir, exist_ok=True)
+
+    manifest_path = os.path.join(build_dir, "dependency_manifest.json")
+    manifest_payload = {
+        "entry_point": entry_point,
+        "ordered_files": resolution["ordered"],
+        "missing": resolution["missing"],
+        "cycles": resolution["cycles"],
+    }
+
+    if resolution["missing"]:
+        print("[build] Warning: unresolved dependencies detected:")
+        for issue in resolution["missing"]:
+            rel = os.path.relpath(issue["source"], project_path)
+            print(f"  - {issue['target']} referenced in {rel}:{issue['line']} ({issue['type']})")
+
+    if resolution["cycles"]:
+        print("[build] Warning: dependency cycles detected:")
+        for cycle in resolution["cycles"]:
+            printable = " -> ".join([os.path.relpath(node, project_path) for node in cycle])
+            print(f"  - {printable}")
+
+    bundler = PryzmaSourceBundler(project_path)
+    bundled_source = bundler.bundle(entry_point)
+
+    manifest_payload["bundled_modules"] = bundler.module_metadata
+    with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest_payload, manifest_file, indent=4)
+
+    with open(os.path.join(os.path.dirname(__file__), "minimal.py")) as file:
+        py_template = file.read()
+
+    runner = f"""
+EMBEDDED_SOURCE = {bundled_source!r}
+
+
+if __name__ == "__main__":
+    interpreter = PryzmaInterpreter()
+    interpreter.file_path = "<embedded>"
+    interpreter.variables["__file__"] = "<embedded>"
+    interpreter.pre_interpret(EMBEDDED_SOURCE)
+    """
+
+    build = py_template + runner
+
+    base_name = os.path.splitext(os.path.basename(entry_point))[0]
+    out_name = os.path.join(build_dir, f"{base_name}_generated.py")
     with open(out_name, "w") as out_file:
         out_file.write(build)
 
@@ -1289,21 +1409,74 @@ def ppm_install(package_name):
         print(f"Package '{package_name}' is already installed.")
         return
 
-    # === PRIMARY SOURCE ===
-    primary_url = f"http://pryzma.dzordz.pl/api/download/{package_name}"
-    print(f"Trying to download {package_name} from primary source...")
+    # === MIRRORS / PRIMARY SOURCES ===
+    # Mirrors can be configured in the user's local config under the key 'ppm_mirrors'
+    # They should be base URLs that accept /download/<package_name>
 
-    try:
-        response = requests.get(primary_url, timeout=10)
-        response.raise_for_status()
+    def get_ppm_mirrors():
+        cfg = load_config()
+        mirrors = cfg.get('ppm_mirrors', []) if isinstance(cfg, dict) else []
+        if not mirrors:
+            # default primary
+            mirrors = ["http://pryzma.dzordz.pl/api"]
+        return mirrors
 
-        print("Download succeeded. Extracting package...")
-        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
-            zip_ref.extractall(package_path)
-        print(f"{package_name} installed successfully from primary source.")
-        return
-    except Exception as e:
-        print(f"Primary source failed: {e}")
+    def choose_mirrors_by_latency(mirrors, package_name, timeout=3):
+        timings = []
+        for m in mirrors:
+            base = m.rstrip('/')
+            url = f"{base}/download/{package_name}"
+            try:
+                import time
+                t0 = time.time()
+                r = requests.head(url, timeout=timeout, allow_redirects=True)
+                if r.status_code == 200:
+                    timings.append((time.time() - t0, m))
+            except Exception:
+                continue
+
+        timings.sort(key=lambda x: x[0])
+        return [m for _, m in timings]
+
+    mirrors = get_ppm_mirrors()
+    print(f"[ppm] Using {len(mirrors)} mirror(s)")
+
+    # Probe mirrors to find reachable ones ordered by latency
+    ordered_mirrors = choose_mirrors_by_latency(mirrors, package_name)
+
+    tried_any = False
+    for mirror in ordered_mirrors:
+        tried_any = True
+        primary_url = mirror.rstrip('/') + f"/download/{package_name}"
+        print(f"Trying to download {package_name} from {primary_url}...")
+        try:
+            response = requests.get(primary_url, timeout=10)
+            response.raise_for_status()
+
+            print("Download succeeded. Extracting package...")
+            with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
+                zip_ref.extractall(package_path)
+            print(f"{package_name} installed successfully from {mirror}.")
+            return
+        except Exception as e:
+            print(f"Mirror {mirror} failed: {e}")
+
+    # If we probed mirrors but none returned 200 on HEAD, fall back to trying mirrors in provided order
+    if not tried_any and mirrors:
+        for mirror in mirrors:
+            primary_url = mirror.rstrip('/') + f"/download/{package_name}"
+            print(f"Trying to download {package_name} from {primary_url} (fallback order)...")
+            try:
+                response = requests.get(primary_url, timeout=10)
+                response.raise_for_status()
+
+                print("Download succeeded. Extracting package...")
+                with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
+                    zip_ref.extractall(package_path)
+                print(f"{package_name} installed successfully from {mirror}.")
+                return
+            except Exception as e:
+                print(f"Mirror {mirror} failed: {e}")
 
     # === FALLBACK SOURCE ===
     print("Trying fallback source (GitHub)...")
@@ -1322,7 +1495,7 @@ def ppm_install(package_name):
         print(f"{package_name} installed successfully from GitHub.")
     except Exception as e:
         print(f"Fallback source failed: {e}")
-        print("Package installation failed from both sources.")
+        print("Package installation failed from all sources.")
     finally:
         if os.path.exists(clone_dir):
             shutil.rmtree(clone_dir)
@@ -1384,6 +1557,196 @@ def ppm_update_all():
     for pkg in Path(PACKAGES_DIR).iterdir():
         if pkg.is_dir():
             ppm_update_package(pkg.name)
+
+
+### Local config helpers ###
+def load_local_config():
+    # Prefer local config; if it doesn't exist, fall back to global config
+    local_path = CONFIG_PATHS[0]
+    global_path = CONFIG_PATHS[1] if len(CONFIG_PATHS) > 1 else None
+
+    # Try local first
+    if os.path.exists(local_path):
+        try:
+            with open(local_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    # Fallback to global if present
+    if global_path and os.path.exists(global_path):
+        try:
+            with open(global_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    return {}
+
+def save_used_config(cfg):
+    """Save cfg to the config file that would be used by load_local_config():
+    prefer local CONFIG_PATHS[0] if it exists, otherwise use global CONFIG_PATHS[1].
+    Creates parent dirs and writes atomically.
+    """
+    # determine the active config path (first existing or local default)
+    target = get_active_config_path()
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(target), encoding='utf-8') as tf:
+            json.dump(cfg, tf, indent=4)
+            tmpname = tf.name
+        os.replace(tmpname, target)
+        return True
+    except Exception as e:
+        print(f"[config] Failed to write config to {target}: {e}")
+        try:
+            if 'tmpname' in locals() and os.path.exists(tmpname):
+                os.remove(tmpname)
+        except Exception:
+            pass
+        return False
+
+
+def get_active_config_path():
+    """Return the config path that load_config() would use (first existing in CONFIG_PATHS),
+    or the local path (CONFIG_PATHS[0]) if none exist.
+    """
+    for path in CONFIG_PATHS:
+        if os.path.exists(path):
+            return path
+    return CONFIG_PATHS[0]
+
+
+def load_global_config():
+    """Load only the global config file (CONFIG_PATHS[1]) and return a dict."""
+    if len(CONFIG_PATHS) < 2:
+        return {}
+    cfg_path = CONFIG_PATHS[1]
+    if not os.path.exists(cfg_path):
+        return {}
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg, use_global=False):
+    """Save cfg to local (default) or global config depending on use_global flag. Atomic write."""
+    if use_global and len(CONFIG_PATHS) > 1:
+        target = CONFIG_PATHS[1]
+    else:
+        target = CONFIG_PATHS[0]
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(target), encoding='utf-8') as tf:
+            json.dump(cfg, tf, indent=4)
+            tmpname = tf.name
+        os.replace(tmpname, target)
+        return True
+    except Exception as e:
+        print(f"[config] Failed to write config to {target}: {e}")
+        try:
+            if 'tmpname' in locals() and os.path.exists(tmpname):
+                os.remove(tmpname)
+        except Exception:
+            pass
+        return False
+
+def ppm_mirrors_list(use_global=False):
+    cfg = load_config() if not use_global else (load_global_config() if 'load_global_config' in globals() else {})
+    mirrors = cfg.get('ppm_mirrors', [])
+    if not mirrors:
+        print("[mirrors] No mirrors configured. Default will be used.")
+        return
+    print("Configured mirrors:")
+    for i, m in enumerate(mirrors, start=1):
+        print(f" {i}. {m}")
+
+
+def ppm_mirrors_add(url, use_global=False):
+    cfg = load_config() if not use_global else (load_global_config() if 'load_global_config' in globals() else {})
+    mirrors = cfg.get('ppm_mirrors', [])
+    if url in mirrors:
+        print("[mirrors] Mirror already exists in list")
+        return False
+    mirrors.append(url)
+    cfg['ppm_mirrors'] = mirrors
+    if use_global:
+        ok = save_config(cfg, use_global=True)
+    else:
+        ok = save_used_config(cfg)
+    if ok:
+        print(f"[mirrors] Added mirror: {url}")
+        return True
+    return False
+
+
+def ppm_mirrors_remove(identifier, use_global=False):
+    cfg = load_config() if not use_global else (load_global_config() if 'load_global_config' in globals() else {})
+    mirrors = cfg.get('ppm_mirrors', [])
+    if not mirrors:
+        print("[mirrors] No mirrors configured")
+        return False
+
+    # try treating identifier as index
+    try:
+        idx = int(identifier)
+        if 1 <= idx <= len(mirrors):
+            removed = mirrors.pop(idx-1)
+            cfg['ppm_mirrors'] = mirrors
+            if use_global:
+                save_config(cfg, use_global=True)
+            else:
+                save_used_config(cfg)
+            print(f"[mirrors] Removed mirror: {removed}")
+            return True
+    except Exception:
+        pass
+
+    # try treating identifier as exact url
+    if identifier in mirrors:
+        mirrors.remove(identifier)
+        cfg['ppm_mirrors'] = mirrors
+        if use_global:
+            save_config(cfg, use_global=True)
+        else:
+            save_used_config(cfg)
+        print(f"[mirrors] Removed mirror: {identifier}")
+        return True
+
+    print("[mirrors] Mirror not found")
+    return False
+
+
+def ppm_mirrors_test(timeout=3, use_global=False):
+    cfg = load_config() if not use_global else (load_global_config() if 'load_global_config' in globals() else {})
+    mirrors = cfg.get('ppm_mirrors', [])
+    if not mirrors:
+        mirrors = ["http://pryzma.dzordz.pl/api"]
+
+    import time
+    results = []
+    for m in mirrors:
+        try:
+            t0 = time.time()
+            r = requests.head(m, timeout=timeout, allow_redirects=True)
+            elapsed = time.time() - t0
+            status = r.status_code
+            results.append((m, elapsed, status))
+        except Exception as e:
+            results.append((m, None, str(e)))
+
+    print("Mirror test results:")
+    for m, elapsed, status in results:
+        if elapsed is None:
+            print(f" - {m}: ERROR ({status})")
+        else:
+            print(f" - {m}: {elapsed:.3f}s (HTTP {status})")
 
 
 def notes_list(proj_name):
@@ -1528,6 +1891,13 @@ def build_parser():
 
     proj_build = proj_subparsers.add_parser("build", help="Build a specified project")
     proj_build.add_argument("proj_name", help="Name of the project to build")
+    proj_build.add_argument("-a", "--auto-fetch", action="store_true", dest="auto_fetch", help="Automatically fetch missing Pryzma package dependencies via ppm when building")
+
+    # Top-level build command (can build a project or a single file)
+    build_cmd = subparsers.add_parser("build", help="Build a Pryzma project or file")
+    build_cmd.add_argument("proj_name", nargs="?", help="Name of the project to build")
+    build_cmd.add_argument("-f", "--file", dest="file", help="Build a single .pryzma file instead of a project")
+    build_cmd.add_argument("-a", "--auto-fetch", action="store_true", dest="auto_fetch", help="Automatically fetch missing Pryzma package dependencies via ppm when building")
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a Pryzma script")
@@ -1568,6 +1938,24 @@ def build_parser():
     ppm = subparsers.add_parser("ppm", help="Pryzma package manager")
     ppm.add_argument("action", choices=["install", "list", "remove", "info", "update", "fetch"])
     ppm.add_argument("package", nargs="?")
+
+    # Mirrors management for ppm
+    mirrors_parser = subparsers.add_parser("mirrors", help="Manage ppm mirrors")
+    mirrors_sub = mirrors_parser.add_subparsers(dest="mirrors_action")
+
+    mirrors_add = mirrors_sub.add_parser("add", help="Add a mirror (base URL)")
+    mirrors_add.add_argument("url", help="Mirror base URL (e.g. https://mirror.example/api)")
+    mirrors_add.add_argument("--global", action="store_true", dest="use_global", help="Write mirror to global config (~/.pryzma/config.json) instead of local config")
+
+    mirrors_list = mirrors_sub.add_parser("list", help="List configured mirrors")
+    mirrors_list.add_argument("--global", action="store_true", dest="use_global", help="Read mirrors from global config instead of local")
+
+    mirrors_remove = mirrors_sub.add_parser("remove", help="Remove a mirror by index or URL")
+    mirrors_remove.add_argument("id", help="Mirror index (1-based) or exact URL to remove")
+    mirrors_remove.add_argument("--global", action="store_true", dest="use_global", help="Remove mirror from global config instead of local")
+
+    mirrors_test = mirrors_sub.add_parser("test", help="Test mirrors for latency and reachability")
+    mirrors_test.add_argument("--global", action="store_true", dest="use_global", help="Test mirrors defined in global config instead of local")
 
     # Config command
     config_parser = subparsers.add_parser("config", help="Manage configuration")
@@ -1649,6 +2037,13 @@ def main():
             print("[proj] Unknown project subcommand.")
     elif args.command == "run":
         run_script(args.path, args.debug)
+    elif args.command == "build":
+        if getattr(args, 'file', None):
+            build_file(args.file, getattr(args, 'auto_fetch', False))
+        elif getattr(args, 'proj_name', None):
+            build_project(args)
+        else:
+            print("[build] Please specify a project name or use -f/--file to build a single file.")
     elif args.command == "compile":
         compile_script(args.path)
     elif args.command == "venv":
@@ -1730,6 +2125,17 @@ def main():
             notes_add(args.project_name, args.note)
         else:
             print("[notes] Unknown notes subcommand.")
+    elif args.command == "mirrors":
+        if args.mirrors_action == "list":
+            ppm_mirrors_list()
+        elif args.mirrors_action == "add":
+            ppm_mirrors_add(args.url)
+        elif args.mirrors_action == "remove":
+            ppm_mirrors_remove(args.id)
+        elif args.mirrors_action == "test":
+            ppm_mirrors_test()
+        else:
+            print("[mirrors] Unknown mirrors subcommand.")
     elif args.command and args.command.startswith("ictfd"):
         ictfd_script = os.path.join(PRYZMA_PATH, "tools", "ictfd.py")
         if not os.path.exists(ictfd_script):
